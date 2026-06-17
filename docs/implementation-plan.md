@@ -39,6 +39,7 @@ flowchart TD
     P6["Phase 6: Edge Cases & Failure Resilience"]
     P7["Phase 7: Monitoring & Analytics (PostgreSQL)"]
     P8["Phase 8: Dev Tooling & CI"]
+    P9["Phase 9: TCP/WebSocket Proxy Server"]
 
     P1 --> P2
     P1 --> P3
@@ -48,6 +49,7 @@ flowchart TD
     P5 --> P6
     P6 --> P7
     P7 --> P8
+    P8 --> P9
 ```
 
 ---
@@ -422,6 +424,58 @@ sequenceDiagram
 
 ---
 
+## Phase 9: TCP/WebSocket Proxy Server
+
+**Goal:** Build a production-ready TCP and WebSocket proxy server on top of the Pipeline SDK, supporting 10K concurrent connections with circuit-breaking, backpressure, and graceful shutdown.
+
+### Architecture
+
+```mermaid
+flowchart LR
+    subgraph Client["Client (WS/TCP)"]
+        CR["io.Reader (client→up)"]
+        CW["io.Writer (up→client)"]
+    end
+
+    subgraph Proxy["Kervan-Proxy Server"]
+        H["HTTP Handler<br/>(/ws, /healthz)"]
+        T["TCP Relay<br/>(raw TCP)"]
+        UP["WebSocket Upgrader"]
+        IP["ingress Pipeline<br/>(client→upstream)"]
+        EP["egress Pipeline<br/>(upstream→client)"]
+    end
+
+    subgraph Upstream["Upstream Backend"]
+        US["TCP Endpoint"]
+    end
+
+    CR --> H
+    H --> UP
+    UP --> IP
+    IP --> US
+    US --> EP
+    EP --> CW
+    US --> T
+    T --> CR
+```
+
+### Subtasks
+
+| # | Subtask | Acceptance Criteria |
+|---|---------|---------------------|
+| 9.1 | Add `gorilla/websocket` dependency | `go get github.com/gorilla/websocket`; `go build ./...` succeeds |
+| 9.2 | Configuration via flags and env vars | CLI flags: `--listen`, `--upstream`, `--capacity`, `--backpressure`, `--max-connections`, `--upstream-timeout` |
+| 9.3 | `wsAdapter` — wraps `gorilla/websocket.Conn` as `io.Reader`/`io.Writer` | Read hangs until message arrives; Write sends message frames |
+| 9.4 | Bi-directional pipeline wiring | Each connection gets ingress + egress Pipeline, both Start'd and Stop'd atomically |
+| 9.5 | TCP relay handler and WebSocket upgrader | Raw TCP connects to upstream; WS `/ws` upgrades and proxies |
+| 9.6 | Connection lifecycle | Accept → handshake → pipeline Start → block → cleanup; `--max-connections` enforces limit |
+| 9.7 | Graceful shutdown (SIGINT/SIGTERM) | `signal.Notify` → listener close → active connections Stop'd → wait |
+| 9.8 | Health check and metrics endpoint | `GET /healthz` returns `{"status":"ok","connections":N,"uptime":"..."}` |
+| 9.9 | Integration test: echo upstream | Client sends data → proxy relays → upstream echoes back → client receives |
+| 9.10 | Circuit-breaking integration test | Upstream fails → valve HELD → buffers → upstream recovers → DRAINING → OPEN |
+
+---
+
 ## Summary Timeline
 
 | Phase | Est. Duration | Key Deliverable |
@@ -434,4 +488,5 @@ sequenceDiagram
 | P6: Edge Cases | 2 days | 4 failure mode handlers |
 | **P7: Monitoring** | **3 days** | **Async + PostgreSQL observability** |
 | P8: Tooling & CI | 1 day | Makefile, linter, CI, docs |
-| **Total** | **~16 days** | |
+| P9: Proxy Server | 2 days | TCP/WS proxy with 10K concurrent connections |
+| **Total** | **~18 days** | |
