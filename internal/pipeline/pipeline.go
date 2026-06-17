@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ysBayram/kervan-proxy/internal/interceptor"
 	"github.com/ysBayram/kervan-proxy/internal/sanctuary"
@@ -29,10 +30,11 @@ type Pipeline struct {
 	monitor    Monitor
 	cfg        Config
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-	mu     sync.Mutex
+	ctx        context.Context
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	mu         sync.Mutex
+	sourceDone atomic.Bool
 }
 
 type Option func(*Pipeline)
@@ -119,7 +121,7 @@ func (p *Pipeline) ingestionLoop() {
 			} else {
 				p.emitEvent("source_disconnect", map[string]any{"reason": err.Error()})
 			}
-			p.cancel()
+			p.sourceDone.Store(true)
 			return
 		}
 
@@ -201,6 +203,9 @@ func (p *Pipeline) executionLoop() {
 			}
 
 		case valve.OPEN:
+			if p.sourceDone.Load() && p.sanctuary.Len() == 0 {
+				return
+			}
 			p.intercepts.Evaluate()
 		}
 	}
