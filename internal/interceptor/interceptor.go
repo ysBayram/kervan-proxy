@@ -1,14 +1,5 @@
 package interceptor
 
-type EventType int
-
-const (
-	EventValveTransition EventType = iota
-	EventBackpressure
-	EventTargetFailure
-	EventSourceDisconnect
-)
-
 type ActionResult struct {
 	RuleName string
 	Fired    bool
@@ -27,16 +18,28 @@ func (ic *InterceptorChain) AddRule(r Rule) {
 }
 
 func (ic *InterceptorChain) Evaluate() []ActionResult {
+	return ic.evaluate(nil)
+}
+
+func (ic *InterceptorChain) EvaluateEvent(event Event) []ActionResult {
+	return ic.evaluate(&event)
+}
+
+func (ic *InterceptorChain) evaluate(event *Event) []ActionResult {
 	var results []ActionResult
 	for _, r := range ic.rules {
-		if r.Predicate != nil && r.Predicate() {
-			if r.Action != nil {
-				r.Action()
-			}
-			results = append(results, ActionResult{RuleName: r.Name, Fired: true})
-		} else {
+		if event != nil && r.OnEvent != EventAny && r.OnEvent != event.Type {
 			results = append(results, ActionResult{RuleName: r.Name, Fired: false})
+			continue
 		}
+		if r.Predicate != nil && !r.Predicate() {
+			results = append(results, ActionResult{RuleName: r.Name, Fired: false})
+			continue
+		}
+		if r.Action != nil {
+			r.Action()
+		}
+		results = append(results, ActionResult{RuleName: r.Name, Fired: true})
 	}
 	return results
 }
