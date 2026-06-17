@@ -13,8 +13,9 @@ import (
 )
 
 type Config struct {
-	SanctuaryCapacity int
-	ReadBufferSize    int
+	SanctuaryCapacity  int
+	ReadBufferSize     int
+	BackpressureAction sanctuary.BackpressureAction
 }
 
 type Monitor interface {
@@ -133,21 +134,33 @@ func (p *Pipeline) ingestionLoop() {
 		case valve.OPEN:
 			if _, err := p.target.Write(data); err != nil {
 				p.emitEvent("target_failure", map[string]any{"error": err.Error()})
-				if p.cancel != nil {
-					p.cancel()
-				}
-				return
+				p.sanctuary.Push(data)
+				p.valve.TransitionTo(valve.HELD)
+				p.emitEvent("valve_transition", map[string]any{
+					"from": "OPEN",
+					"to":   "HELD",
+				})
 			}
 		case valve.HELD, valve.DRAINING:
 			if err := p.sanctuary.Push(data); err != nil {
-				p.emitEvent("backpressure", map[string]any{
-					"action": "drop_oldest",
-					"len":    p.sanctuary.Len(),
-					"cap":    p.sanctuary.Cap(),
-					"reason": err.Error(),
-				})
-				p.sanctuary.DropOldest()
-				p.sanctuary.Push(data)
+				action := p.cfg.BackpressureAction
+				if action == sanctuary.RejectNew {
+					p.emitEvent("backpressure", map[string]any{
+						"action": "reject_new",
+						"len":    p.sanctuary.Len(),
+						"cap":    p.sanctuary.Cap(),
+						"reason": err.Error(),
+					})
+				} else {
+					p.emitEvent("backpressure", map[string]any{
+						"action": "drop_oldest",
+						"len":    p.sanctuary.Len(),
+						"cap":    p.sanctuary.Cap(),
+						"reason": err.Error(),
+					})
+					p.sanctuary.DropOldest()
+					p.sanctuary.Push(data)
+				}
 			}
 		}
 	}
