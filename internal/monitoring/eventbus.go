@@ -2,7 +2,6 @@ package monitoring
 
 import (
 	"context"
-	"sync"
 	"sync/atomic"
 )
 
@@ -50,9 +49,7 @@ func (eb *EventBus) Cap() int {
 }
 
 type Monitor struct {
-	bus     *EventBus
-	started atomic.Bool
-	mu      sync.Mutex
+	bus *EventBus
 }
 
 func NewMonitor(bus *EventBus) *Monitor {
