@@ -101,7 +101,8 @@ func TestNoopRecorder(t *testing.T) {
 func BenchmarkEventBusPublish(b *testing.B) {
 	bus := NewEventBus(10000)
 	go func() {
-		for range bus.Subscribe() {}
+		for range bus.Subscribe() {
+		}
 	}()
 
 	b.ResetTimer()
@@ -115,12 +116,13 @@ func BenchmarkMonitorRecord(b *testing.B) {
 	bus := NewEventBus(10000)
 	m := NewMonitor(bus)
 	go func() {
-		for range bus.Subscribe() {}
+		for range bus.Subscribe() {
+		}
 	}()
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		m.Record(nil, EventTypeTargetFailure, map[string]any{"error": "bench"})
+		m.Record(context.TODO(), EventTypeTargetFailure, map[string]any{"error": "bench"})
 	}
 	bus.Close()
 }

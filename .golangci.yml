@@ -1,0 +1,17 @@
+version: "2"
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  disable:
+    - errcheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  exclude-dirs:
+    - build
