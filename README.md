@@ -13,7 +13,7 @@ Kervan-Proxy is built on four core primitives:
 | **Sanctuary** | Per-pipeline bounded FIFO ring-buffer (zero-alloc via `sync.Pool`) |
 | **Interceptor** | WHEN-THEN predicate rules driving state transitions |
 
-## States
+### States
 
 ```
 OPEN ──→ HELD ──→ DRAINING ──→ OPEN
@@ -24,30 +24,69 @@ OPEN ──→ HELD ──→ DRAINING ──→ OPEN
 
 ## Quick Start
 
-```go
-package main
+### Run as a proxy server
 
-import (
-    "io"
-    "os"
-    "github.com/ysBayram/kervan-proxy/internal/pipeline"
-)
+```sh
+# Build
+make build
 
-func main() {
-    p := pipeline.NewPipeline(os.Stdin, os.Stdout)
-    if err := p.Start(); err != nil {
-        panic(err)
-    }
-    defer p.Stop()
-    io.Copy(os.Stdout, os.Stdin) // handled by pipeline
-}
+# Run with defaults (listens :8080, forwards to 127.0.0.1:9000)
+./build/kervan-proxy
+
+# With custom flags
+./build/kervan-proxy \
+    --listen :9090 \
+    --upstream 10.0.0.1:3000 \
+    --capacity 5000 \
+    --backpressure drop_oldest \
+    --max-connections 10000
 ```
 
-## Usage
+### WebSocket echo test
+
+```sh
+# Terminal 1: start echo server
+nc -l -k -p 9000
+
+# Terminal 2: start proxy
+./build/kervan-proxy --listen :8080 --upstream :9000
+
+# Terminal 3: connect via WebSocket
+curl -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" \
+    -H "Sec-WebSocket-Version: 13" \
+    -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+    http://localhost:8080/ws
+```
+
+### Health check
+
+```sh
+curl http://localhost:8080/healthz
+# {"connections":0,"status":"ok","uptime":"1m23s"}
+```
+
+## Configuration
+
+All options available as CLI flags or environment variables:
+
+| Flag | Env | Default | Description |
+|------|-----|---------|-------------|
+| `--listen` | `LISTEN` | `:8080` | Listen address (host:port) |
+| `--upstream` | `UPSTREAM` | `127.0.0.1:9000` | Upstream backend address |
+| `--capacity` | `CAPACITY` | `10000` | Sanctuary buffer capacity per pipeline |
+| `--backpressure` | `BACKPRESSURE` | `drop_oldest` | Backpressure mode (`drop_oldest` or `reject_new`) |
+| `--max-connections` | `MAX_CONNECTIONS` | `10000` | Maximum concurrent connections |
+| `--upstream-timeout` | `UPSTREAM_TIMEOUT` | `10s` | Upstream dial timeout |
+| `--read-timeout` | `READ_TIMEOUT` | `30s` | HTTP read timeout |
+| `--write-timeout` | `WRITE_TIMEOUT` | `30s` | HTTP write timeout |
+
+## Using the SDK
 
 ### Basic relay (OPEN mode)
 
 ```go
+import "github.com/ysBayram/kervan-proxy/internal/pipeline"
+
 srcR, srcW := io.Pipe()
 var buf bytes.Buffer
 
@@ -72,6 +111,8 @@ p.Valve().TransitionTo(valve.DRAINING)
 ### Interceptors
 
 ```go
+import "github.com/ysBayram/kervan-proxy/internal/interceptor"
+
 p.RegisterRule(interceptor.Rule{
     Name: "backpressure-threshold",
     Predicate: interceptor.SanctuaryUsageAbove(sanctuary, 0.9),
@@ -79,17 +120,31 @@ p.RegisterRule(interceptor.Rule{
 })
 ```
 
+### WebSocket proxy (bi-directional)
+
+```go
+import "github.com/ysBayram/kervan-proxy/internal/server"
+
+cfg := server.ConfigFromFlags()
+srv := server.NewProxyServer(cfg)
+srv.Start()
+defer srv.Stop()
+// Listen on :8080/ws, proxies to --upstream
+```
+
 ## Project Structure
 
 ```
-├── cmd/kervan-proxy/        # Main binary entry point
+├── cmd/kervan-proxy/        # Main binary entry point (proxy server)
 ├── internal/
 │   ├── interceptor/         # Rule engine (WHEN-THEN predicates)
-│   ├── monitoring/           # Async EventBus + pgx recorder (build-tag isolated)
+│   ├── monitoring/          # Async EventBus + pgx recorder (build-tag isolated)
 │   ├── pipeline/            # Stream orchestrator (dual-goroutine)
 │   ├── sanctuary/           # Bounded FIFO ring-buffer
+│   ├── server/              # TCP/WebSocket proxy server
 │   └── valve/               # Atomic CAS state machine
 ├── sql/migrations/          # PostgreSQL migration scripts
+├── docs/                    # Technical design, implementation plan, results
 ├── Makefile                 # Build, test, lint, bench targets
 └── .github/workflows/       # GitHub Actions CI
 ```
@@ -105,7 +160,7 @@ p.RegisterRule(interceptor.Rule{
 
 | Command | Description |
 |---------|-------------|
-| `make build` | Build the proxy binary |
+| `make build` | Build the proxy binary to `build/kervan-proxy` |
 | `make test` | Run all tests with race detector |
 | `make lint` | Run golangci-lint (falls back to `go vet`) |
 | `make bench` | Run all benchmarks |
