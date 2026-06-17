@@ -46,6 +46,13 @@ func WithMonitor(m Monitor) Option {
 	}
 }
 
+func WithSanctuaryCapacity(capacity int) Option {
+	return func(p *Pipeline) {
+		p.cfg.SanctuaryCapacity = capacity
+		p.sanctuary = sanctuary.NewSanctuary(capacity)
+	}
+}
+
 func NewPipeline(source io.Reader, target io.Writer, opts ...Option) *Pipeline {
 	cfg := Config{
 		SanctuaryCapacity: 10000,
@@ -67,6 +74,10 @@ func NewPipeline(source io.Reader, target io.Writer, opts ...Option) *Pipeline {
 
 func (p *Pipeline) RegisterRule(rule interceptor.Rule) {
 	p.intercepts.AddRule(rule)
+}
+
+func (p *Pipeline) SetBackpressure(action sanctuary.BackpressureAction) {
+	p.cfg.BackpressureAction = action
 }
 
 func (p *Pipeline) Start() error {
