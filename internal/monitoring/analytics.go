@@ -8,13 +8,13 @@ import (
 )
 
 type DisruptionSession struct {
-	PipelineID           string    `json:"pipeline_id"`
-	SourceAddr           string    `json:"source_addr"`
-	TargetAddr           string    `json:"target_addr"`
-	HeldAt               time.Time `json:"held_at"`
-	DrainedAt            *time.Time `json:"drained_at,omitempty"`
-	DurationUs           *int64    `json:"duration_us,omitempty"`
-	BackpressureTriggered bool      `json:"backpressure_triggered"`
+	PipelineID            string     `json:"pipeline_id"`
+	SourceAddr            string     `json:"source_addr"`
+	TargetAddr            string     `json:"target_addr"`
+	HeldAt                time.Time  `json:"held_at"`
+	DrainedAt             *time.Time `json:"drained_at,omitempty"`
+	DurationUs            *int64     `json:"duration_us,omitempty"`
+	BackpressureTriggered bool       `json:"backpressure_triggered"`
 }
 
 type SourceDisruption struct {
@@ -25,8 +25,8 @@ type SourceDisruption struct {
 }
 
 type BackpressureFreq struct {
-	Action        string  `json:"action"`
-	Count         int64   `json:"count"`
+	Action          string  `json:"action"`
+	Count           int64   `json:"count"`
 	AvgSanctuaryPct float64 `json:"avg_sanctuary_pct"`
 }
 

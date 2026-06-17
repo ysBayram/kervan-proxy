@@ -10,11 +10,11 @@ type ValveTransitionEvent struct {
 }
 
 type BackpressureEvent struct {
-	PipelineID    string
-	Action        string
-	SanctuaryLen  int
-	SanctuaryCap  int
-	Timestamp     time.Time
+	PipelineID   string
+	Action       string
+	SanctuaryLen int
+	SanctuaryCap int
+	Timestamp    time.Time
 }
 
 type TargetFailureEvent struct {

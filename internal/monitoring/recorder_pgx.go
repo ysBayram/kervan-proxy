@@ -12,9 +12,9 @@ import (
 )
 
 type pgxRecorder struct {
-	pool   *pgxpool.Pool
-	bus    *EventBus
-	done   chan struct{}
+	pool *pgxpool.Pool
+	bus  *EventBus
+	done chan struct{}
 }
 
 func NewRecorder(bus *EventBus) Recorder {
@@ -50,7 +50,7 @@ func (r *pgxRecorder) Stop() error {
 
 func (r *pgxRecorder) batchLoop(ctx context.Context) {
 	const (
-		batchSize    = 100
+		batchSize     = 100
 		flushInterval = time.Second
 	)
 

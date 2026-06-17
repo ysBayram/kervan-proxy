@@ -48,16 +48,16 @@ func TestEvaluateEventFiltering(t *testing.T) {
 	var valveFired, backFired int32
 
 	ic.AddRule(Rule{
-		Name:    "on-valve",
-		OnEvent: EventValveTransition,
+		Name:      "on-valve",
+		OnEvent:   EventValveTransition,
 		Predicate: func() bool { return true },
-		Action:     func() { atomic.AddInt32(&valveFired, 1) },
+		Action:    func() { atomic.AddInt32(&valveFired, 1) },
 	})
 	ic.AddRule(Rule{
-		Name:    "on-backpressure",
-		OnEvent: EventBackpressure,
+		Name:      "on-backpressure",
+		OnEvent:   EventBackpressure,
 		Predicate: func() bool { return true },
-		Action:     func() { atomic.AddInt32(&backFired, 1) },
+		Action:    func() { atomic.AddInt32(&backFired, 1) },
 	})
 
 	results := ic.EvaluateEvent(Event{Type: EventValveTransition})
@@ -80,10 +80,10 @@ func TestEventAnyMatchesAllEvents(t *testing.T) {
 	var fired int32
 
 	ic.AddRule(Rule{
-		Name:    "catch-all",
-		OnEvent: EventAny,
+		Name:      "catch-all",
+		OnEvent:   EventAny,
 		Predicate: func() bool { return true },
-		Action:     func() { atomic.AddInt32(&fired, 1) },
+		Action:    func() { atomic.AddInt32(&fired, 1) },
 	})
 
 	ic.EvaluateEvent(Event{Type: EventValveTransition})
@@ -231,10 +231,10 @@ func TestS2ErrorThresholdToHeld(t *testing.T) {
 
 	ic := NewInterceptorChain()
 	ic.AddRule(Rule{
-		Name:    "error-threshold",
-		OnEvent: EventTargetFailure,
+		Name:      "error-threshold",
+		OnEvent:   EventTargetFailure,
 		Predicate: ConsecutiveReadErrors(errCounter, 3),
-		Action:  TransitionValveTo(v, "HELD"),
+		Action:    TransitionValveTo(v, "HELD"),
 	})
 
 	errCounter.Inc()
@@ -348,8 +348,8 @@ type mockSanctuary struct {
 	dropped  int
 }
 
-func (s *mockSanctuary) Len() int           { return s.length }
-func (s *mockSanctuary) Cap() int           { return s.capacity }
+func (s *mockSanctuary) Len() int { return s.length }
+func (s *mockSanctuary) Cap() int { return s.capacity }
 func (s *mockSanctuary) DropOldest() ([]byte, bool) {
 	s.dropped++
 	s.length--
