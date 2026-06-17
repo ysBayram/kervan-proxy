@@ -47,43 +47,48 @@ func putBlock(buf []byte) {
 	bytePool.Put(&buf)
 }
 
+type slot struct {
+	block []byte
+	len   int
+}
+
 type ringBuffer struct {
-	blocks [][]byte
-	head   int
-	tail   int
-	count  int
-	mu     sync.Mutex
+	slots []slot
+	head  int
+	tail  int
+	count int
+	mu    sync.Mutex
 }
 
 func newRingBuffer(capacity int) *ringBuffer {
 	return &ringBuffer{
-		blocks: make([][]byte, capacity),
+		slots: make([]slot, capacity),
 	}
 }
 
-func (rb *ringBuffer) push(block []byte) bool {
+func (rb *ringBuffer) push(block []byte, dataLen int) bool {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
-	if rb.count == len(rb.blocks) {
+	if rb.count == len(rb.slots) {
 		return false
 	}
-	rb.blocks[rb.tail] = block
-	rb.tail = (rb.tail + 1) % len(rb.blocks)
+	rb.slots[rb.tail] = slot{block: block, len: dataLen}
+	rb.tail = (rb.tail + 1) % len(rb.slots)
 	rb.count++
 	return true
 }
 
-func (rb *ringBuffer) pop() ([]byte, bool) {
+func (rb *ringBuffer) pop() ([]byte, int, bool) {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
 	if rb.count == 0 {
-		return nil, false
+		return nil, 0, false
 	}
-	block := rb.blocks[rb.head]
-	rb.blocks[rb.head] = nil
-	rb.head = (rb.head + 1) % len(rb.blocks)
+	s := rb.slots[rb.head]
+	rb.slots[rb.head] = slot{}
+	rb.head = (rb.head + 1) % len(rb.slots)
 	rb.count--
-	return block, true
+	return s.block, s.len, true
 }
 
 func (rb *ringBuffer) len() int {
@@ -93,7 +98,7 @@ func (rb *ringBuffer) len() int {
 }
 
 func (rb *ringBuffer) cap() int {
-	return len(rb.blocks)
+	return len(rb.slots)
 }
 
 func (rb *ringBuffer) free() int {
@@ -104,9 +109,9 @@ func (rb *ringBuffer) reset() {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
 	for i := 0; i < rb.count; i++ {
-		idx := (rb.head + i) % len(rb.blocks)
-		putBlock(rb.blocks[idx])
-		rb.blocks[idx] = nil
+		idx := (rb.head + i) % len(rb.slots)
+		putBlock(rb.slots[idx].block)
+		rb.slots[idx] = slot{}
 	}
 	rb.head = 0
 	rb.tail = 0
@@ -126,9 +131,8 @@ func NewSanctuary(capacity int) *Sanctuary {
 func (s *Sanctuary) Push(data []byte) error {
 	block := getBlock()
 	n := copy(block, data)
-	_ = n
 
-	if !s.buf.push(block) {
+	if !s.buf.push(block, n) {
 		putBlock(block)
 		return ErrBufferFull
 	}
@@ -136,13 +140,13 @@ func (s *Sanctuary) Push(data []byte) error {
 }
 
 func (s *Sanctuary) Pop() ([]byte, bool) {
-	block, ok := s.buf.pop()
+	block, dataLen, ok := s.buf.pop()
 	if !ok {
 		return nil, false
 	}
 	defer putBlock(block)
-	out := make([]byte, len(block))
-	copy(out, block)
+	out := make([]byte, dataLen)
+	copy(out, block[:dataLen])
 	return out, true
 }
 
@@ -167,10 +171,12 @@ func (s *Sanctuary) Reset() {
 }
 
 func (s *Sanctuary) DropOldest() ([]byte, bool) {
-	block, ok := s.buf.pop()
+	block, dataLen, ok := s.buf.pop()
 	if !ok {
 		return nil, false
 	}
+	out := make([]byte, dataLen)
+	copy(out, block[:dataLen])
 	putBlock(block)
-	return block, true
+	return out, true
 }
