@@ -1,7 +1,23 @@
 package interceptor
 
+type EventType int
+
+const (
+	EventAny EventType = iota
+	EventValveTransition
+	EventBackpressure
+	EventTargetFailure
+	EventSourceDisconnect
+)
+
+type Event struct {
+	Type     EventType
+	Metadata map[string]any
+}
+
 type Rule struct {
 	Name      string
+	OnEvent   EventType
 	Predicate func() bool
 	Action    func()
 }
