@@ -16,6 +16,7 @@ type Config struct {
 	UpstreamTimeout  time.Duration
 	ReadTimeout      time.Duration
 	WriteTimeout     time.Duration
+	DatabaseURL      string
 }
 
 func DefaultConfig() Config {
@@ -28,6 +29,7 @@ func DefaultConfig() Config {
 		UpstreamTimeout:  10 * time.Second,
 		ReadTimeout:      30 * time.Second,
 		WriteTimeout:     30 * time.Second,
+		DatabaseURL:      "postgres://localhost:5432/kervan?sslmode=disable",
 	}
 }
 
@@ -42,6 +44,7 @@ func ConfigFromFlags() Config {
 	flag.DurationVar(&cfg.UpstreamTimeout, "upstream-timeout", envDur("UPSTREAM_TIMEOUT", cfg.UpstreamTimeout), "Upstream dial timeout")
 	flag.DurationVar(&cfg.ReadTimeout, "read-timeout", envDur("READ_TIMEOUT", cfg.ReadTimeout), "Read timeout")
 	flag.DurationVar(&cfg.WriteTimeout, "write-timeout", envDur("WRITE_TIMEOUT", cfg.WriteTimeout), "Write timeout")
+	flag.StringVar(&cfg.DatabaseURL, "database-url", envStr("DATABASE_URL", cfg.DatabaseURL), "Database URL for monitoring")
 	flag.Parse()
 
 	return cfg
