@@ -1,5 +1,7 @@
 package interceptor
 
+import "sync"
+
 type ActionResult struct {
 	RuleName string
 	Fired    bool
@@ -7,6 +9,7 @@ type ActionResult struct {
 
 type InterceptorChain struct {
 	rules []Rule
+	mu    sync.Mutex
 }
 
 func NewInterceptorChain() *InterceptorChain {
@@ -14,7 +17,9 @@ func NewInterceptorChain() *InterceptorChain {
 }
 
 func (ic *InterceptorChain) AddRule(r Rule) {
+	ic.mu.Lock()
 	ic.rules = append(ic.rules, r)
+	ic.mu.Unlock()
 }
 
 func (ic *InterceptorChain) Evaluate() []ActionResult {
@@ -26,8 +31,13 @@ func (ic *InterceptorChain) EvaluateEvent(event Event) []ActionResult {
 }
 
 func (ic *InterceptorChain) evaluate(event *Event) []ActionResult {
+	ic.mu.Lock()
+	rules := make([]Rule, len(ic.rules))
+	copy(rules, ic.rules)
+	ic.mu.Unlock()
+
 	var results []ActionResult
-	for _, r := range ic.rules {
+	for _, r := range rules {
 		if event != nil && r.OnEvent != EventAny && r.OnEvent != event.Type {
 			results = append(results, ActionResult{RuleName: r.Name, Fired: false})
 			continue
@@ -45,5 +55,7 @@ func (ic *InterceptorChain) evaluate(event *Event) []ActionResult {
 }
 
 func (ic *InterceptorChain) Rules() []Rule {
+	ic.mu.Lock()
+	defer ic.mu.Unlock()
 	return ic.rules
 }
