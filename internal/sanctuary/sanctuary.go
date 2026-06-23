@@ -2,6 +2,7 @@ package sanctuary
 
 import (
 	"errors"
+	"io"
 	"sync"
 )
 
@@ -148,6 +149,16 @@ func (s *Sanctuary) Pop() ([]byte, bool) {
 	out := make([]byte, dataLen)
 	copy(out, block[:dataLen])
 	return out, true
+}
+
+func (s *Sanctuary) PopTo(w io.Writer) (int, error, bool) {
+	block, dataLen, ok := s.buf.pop()
+	if !ok {
+		return 0, nil, false
+	}
+	defer putBlock(block)
+	n, err := w.Write(block[:dataLen])
+	return n, err, true
 }
 
 func (s *Sanctuary) Len() int {
