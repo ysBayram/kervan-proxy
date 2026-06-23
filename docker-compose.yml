@@ -1,0 +1,78 @@
+services:
+  kervan-proxy:
+    build:
+      context: .
+      args:
+        BUILD_TAGS: ""
+    ports:
+      - "8080:8080"
+    environment:
+      - LISTEN=:8080
+      - UPSTREAM=host.docker.internal:9000
+      - CAPACITY=10000
+      - MAX_CONNECTIONS=10000
+      - BACKPRESSURE=drop_oldest
+      - UPSTREAM_TIMEOUT=10s
+      - READ_TIMEOUT=30s
+      - WRITE_TIMEOUT=30s
+    restart: unless-stopped
+    profiles:
+      - default
+      - dev
+
+  kervan-proxy-monitoring:
+    build:
+      context: .
+      args:
+        BUILD_TAGS: monitoring
+    ports:
+      - "8080:8080"
+    environment:
+      - LISTEN=:8080
+      - UPSTREAM=host.docker.internal:9000
+      - CAPACITY=10000
+      - MAX_CONNECTIONS=10000
+      - BACKPRESSURE=drop_oldest
+      - UPSTREAM_TIMEOUT=10s
+      - READ_TIMEOUT=30s
+      - WRITE_TIMEOUT=30s
+      - DATABASE_URL=postgres://kervan:kervan@postgres:5432/kervan?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: kervan
+      POSTGRES_PASSWORD: kervan
+      POSTGRES_DB: kervan
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kervan"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+  echo-server:
+    image: python:3.13-alpine
+    command:
+      - sh
+      - -c
+      - python3 -c 'import socketserver; socketserver.TCPServer(("0.0.0.0", 9000), socketserver.StreamRequestHandler).serve_forever()'
+    ports:
+      - "9000:9000"
+    profiles:
+      - dev
+
+volumes:
+  pgdata:
