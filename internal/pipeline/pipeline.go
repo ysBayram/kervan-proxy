@@ -6,6 +6,7 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ysBayram/kervan-proxy/internal/interceptor"
 	"github.com/ysBayram/kervan-proxy/internal/sanctuary"
@@ -189,6 +190,11 @@ func (p *Pipeline) executionLoop() {
 		switch st {
 		case valve.HELD:
 			p.intercepts.Evaluate()
+			select {
+			case <-time.After(10 * time.Millisecond):
+			case <-p.ctx.Done():
+				return
+			}
 			continue
 
 		case valve.DRAINING:

@@ -186,7 +186,7 @@ func TestGracefulShutdownDuringDrain(t *testing.T) {
 	srcW.Close()
 
 	p.Valve().TransitionTo(valve.DRAINING)
-	time.Sleep(20 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 
 	if err := p.Stop(); err != nil {
 		t.Fatal(err)
