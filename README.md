@@ -1,192 +1,193 @@
 # Kervan-Proxy
 
-A zero-dependency, protocol-agnostic L7 proxy and circuit-buffering engine in Go. Kervan-Proxy shields upstream backends by buffering payloads during outages and replaying them in FIFO order once the target recovers.
+A high-performance, zero-dependency, protocol-agnostic L7 application-level proxy and circuit-buffering engine in Go. 
 
-## Architecture
+Kervan-Proxy is inspired by the ancient Silk Road **Caravanserais** (*Kervansaray*). It acts as a digital sanctuary: when upstream backend targets undergo deployments or outages, it avoids severing the client connection. Instead, it holds the connection, buffers incoming stream payloads into a highly-optimized in-memory ring-buffer (`Sanctuary`), and flushes them in a strict FIFO sequence once target health is restored.
 
-Kervan-Proxy is built on four core primitives:
+---
+
+## Key Features
+
+- ⚡ **Zero-Allocation Data Path**: Zero heap allocations on the steady-state streaming data path (`OPEN` state).
+- 🔒 **Concurrency Safe**: Atomic CAS (Compare-And-Swap) transitions for safe state routing.
+- ⚙️ **Rules Engine**: Programmatic and reactive `WHEN-THEN` interceptor chains.
+- 📊 **Telemetry**: Bounded async `EventBus` with optional, transactional PostgreSQL event recorder.
+- 🌐 **Protocol Bridging**: Serves as a WebSocket-to-TCP bridge out of the box.
+
+---
+
+## Architecture & Core Primitives
+
+Kervan-Proxy divides stream orchestration into four core primitives:
 
 | Primitive | Description |
 |-----------|-------------|
-| **Pipeline** | Logical stream binding one Source and one Target |
-| **Valve** | FSM with states `OPEN ↔ HELD ↔ DRAINING` |
-| **Sanctuary** | Per-pipeline bounded FIFO ring-buffer (zero-alloc via `sync.Pool`) |
-| **Interceptor** | WHEN-THEN predicate rules driving state transitions |
+| **Pipeline** | The logical streaming container binding one distinct `Source` (Client) and one `Target` (Upstream). |
+| **Valve** | The internal execution gatekeeper controlling stream routing FSM states: `OPEN`, `HELD`, and `DRAINING`. |
+| **Sanctuary** | A thread-safe, bounded, in-memory FIFO ring-buffer recycling fixed 4KB blocks from a `sync.Pool`. |
+| **Interceptor** | Event-driven predicate rules (`WHEN-THEN` specification) driving automated state transitions. |
 
-### States
+### Operational State Transitions
 
+```mermaid
+stateDiagram-v2
+    [*] --> OPEN : Startup
+    OPEN --> HELD : Target Failure / WHEN Condition Met
+    HELD --> DRAINING : Target Recovered / Handshake Successful
+    DRAINING --> OPEN : Buffer Drained to 0
+    DRAINING --> HELD : Cascading Failure (Target drops mid-drain)
 ```
-OPEN ──→ HELD ──→ DRAINING ──→ OPEN
-  │        │         │
-  │        └── ← ────┘ (cascading failure)
-  └── (target error → preserve frame in Sanctuary)
-```
+
+---
 
 ## Quick Start
 
-### Run as a proxy server
+### 1. Build and Run the Proxy Server
+
+Compile and launch the proxy binary with default options (listens on port `:8080`, forwards to `:9000`):
 
 ```sh
-# Build
+# Build binary
 make build
 
-# Run with defaults (listens :8080, forwards to 127.0.0.1:9000)
+# Run with defaults
 ./build/kervan-proxy
 
-# With custom flags
+# Run with custom configuration flags
 ./build/kervan-proxy \
     --listen :9090 \
-    --upstream 10.0.0.1:3000 \
+    --upstream 127.0.0.1:3000 \
     --capacity 5000 \
     --backpressure drop_oldest \
     --max-connections 10000
 ```
 
-### WebSocket echo test
+### 2. Testing WebSocket Bridging
+
+Since Kervan-Proxy upgrades connections on `/ws` to WebSocket and bridges them to a raw TCP upstream:
 
 ```sh
-# Terminal 1: start echo server
-nc -l -k -p 9000
+# Terminal 1: Start a TCP backend listener
+nc -l 9000
 
-# Terminal 2: start proxy
-./build/kervan-proxy --listen :8080 --upstream :9000
+# Terminal 2: Start the proxy
+./build/kervan-proxy --listen :8080 --upstream 127.0.0.1:9000
 
-# Terminal 3: connect via WebSocket
-curl -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" \
-    -H "Sec-WebSocket-Version: 13" \
-    -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
-    http://localhost:8080/ws
+# Terminal 3: Connect using a WebSocket client (e.g. websocat or wscat)
+websocat ws://localhost:8080/ws
+# Type any text and watch it arrive on the TCP backend (Terminal 1)
 ```
 
-### Health check
+### 3. Health Check Telemetry
+
+Query the server stats:
 
 ```sh
 curl http://localhost:8080/healthz
-# {"connections":0,"status":"ok","uptime":"1m23s"}
+# Output: {"connections":0,"status":"ok","uptime":"1m23s"}
 ```
 
-## Configuration
+---
 
-All options available as CLI flags or environment variables:
+## Configuration Reference
 
-| Flag | Env | Default | Description |
-|------|-----|---------|-------------|
-| `--listen` | `LISTEN` | `:8080` | Listen address (host:port) |
+All configurations can be loaded via environment variables or CLI flags:
+
+| Flag | Environment Variable | Default | Description |
+|------|----------------------|---------|-------------|
+| `--listen` | `LISTEN` | `:8080` | Host and port to listen on |
 | `--upstream` | `UPSTREAM` | `127.0.0.1:9000` | Upstream backend address |
 | `--capacity` | `CAPACITY` | `10000` | Sanctuary buffer capacity per pipeline |
 | `--backpressure` | `BACKPRESSURE` | `drop_oldest` | Backpressure mode (`drop_oldest` or `reject_new`) |
-| `--max-connections` | `MAX_CONNECTIONS` | `10000` | Maximum concurrent connections |
-| `--upstream-timeout` | `UPSTREAM_TIMEOUT` | `10s` | Upstream dial timeout |
-| `--read-timeout` | `READ_TIMEOUT` | `30s` | HTTP read timeout |
-| `--write-timeout` | `WRITE_TIMEOUT` | `30s` | HTTP write timeout |
+| `--max-connections` | `MAX_CONNECTIONS` | `10000` | Max concurrent proxy connections |
+| `--upstream-timeout` | `UPSTREAM_TIMEOUT` | `10s` | Upstream target connection dial timeout |
+| `--read-timeout` | `READ_TIMEOUT` | `30s` | HTTP connection read timeout |
+| `--write-timeout` | `WRITE_TIMEOUT` | `30s` | HTTP connection write timeout |
+| `--database-url` | `DATABASE_URL` | *See Description* | Postgres connection URL. Defaults to: `postgres://localhost:5432/kervan?sslmode=disable` |
+
+---
 
 ## Using the SDK
 
-### Basic relay (OPEN mode)
+Kervan-Proxy is also designed to be imported directly into Go applications.
+
+### Basic Stream Relay (OPEN mode)
 
 ```go
 import "github.com/ysBayram/kervan-proxy/internal/pipeline"
 
-srcR, srcW := io.Pipe()
-var buf bytes.Buffer
-
-p := pipeline.NewPipeline(srcR, &buf)
+// Bind a Reader and Writer
+p := pipeline.NewPipeline(srcReader, dstWriter)
 p.Start()
-
-srcW.Write([]byte("data"))
-srcW.Close()
-p.Stop()
-// buf contains "data"
+defer p.Stop()
 ```
 
-### Circuit breaking (HELD mode)
+### Manual Valve State Transitions
 
 ```go
+import "github.com/ysBayram/kervan-proxy/internal/valve"
+
+// Freeze target writes and buffer data in Sanctuary
 p.Valve().TransitionTo(valve.HELD)
-srcW.Write([]byte("buffered")) // goes to Sanctuary, not target
+
+// Draining phase: flushes buffered data to target in FIFO sequence
 p.Valve().TransitionTo(valve.DRAINING)
-// data drains to target in FIFO order
 ```
 
-### Interceptors
+### Registering Interceptor Rules
 
 ```go
 import "github.com/ysBayram/kervan-proxy/internal/interceptor"
 
 p.RegisterRule(interceptor.Rule{
-    Name: "backpressure-threshold",
-    Predicate: interceptor.SanctuaryUsageAbove(sanctuary, 0.9),
-    Action:    interceptor.ApplyBackpressureAction(sanctuary, "drop_oldest"),
+    Name:      "apply-backpressure",
+    OnEvent:   interceptor.EventBackpressure,
+    Predicate: interceptor.SanctuaryUsageAbove(p.Sanctuary(), 0.9),
+    Action:    interceptor.ApplyBackpressureAction(p.Sanctuary(), "drop_oldest"),
 })
 ```
 
-### WebSocket proxy (bi-directional)
+---
 
-```go
-import "github.com/ysBayram/kervan-proxy/internal/server"
+## Telemetry & Event Recording (Optional)
 
-cfg := server.ConfigFromFlags()
-srv := server.NewProxyServer(cfg)
-srv.Start()
-defer srv.Stop()
-// Listen on :8080/ws, proxies to --upstream
+To enable Postgres-backed logging, compile Kervan-Proxy with the `monitoring` build tag:
+
+```sh
+# Build with monitoring
+make build-monitoring
+
+# Set up PostgreSQL database URL and run proxy
+export DATABASE_URL="postgres://postgres:password@localhost:5432/kervan?sslmode=disable"
+./build/kervan-proxy
 ```
+*Note: The recorder automatically performs table schema migrations on startup.*
+
+---
 
 ## Project Structure
 
 ```
-├── cmd/kervan-proxy/        # Main binary entry point (proxy server)
+├── cmd/kervan-proxy/        # Main CLI entry point
 ├── internal/
-│   ├── interceptor/         # Rule engine (WHEN-THEN predicates)
-│   ├── monitoring/          # Async EventBus + pgx recorder (build-tag isolated)
-│   ├── pipeline/            # Stream orchestrator (dual-goroutine)
-│   ├── sanctuary/           # Bounded FIFO ring-buffer
-│   ├── server/              # TCP/WebSocket proxy server
-│   └── valve/               # Atomic CAS state machine
-├── sql/migrations/          # PostgreSQL migration scripts
-├── docs/                    # Technical design, implementation plan, results
-├── Makefile                 # Build, test, lint, bench targets
-└── .github/workflows/       # GitHub Actions CI
+│   ├── interceptor/         # Rules engine (WHEN-THEN evaluations)
+│   ├── monitoring/          # EventBus and pgx database logger (isolated via build tag)
+│   ├── pipeline/            # Bi-directional dual-goroutine pipeline manager
+│   ├── sanctuary/           # Thread-safe in-memory ring-buffer
+│   ├── server/              # HTTP/WebSocket gateway server
+│   └── valve/               # Concurrency-safe state controller
+├── sql/migrations/          # Database migrations for telemetry
+├── docs/                    # Architectural documents and design specifications
+├── Makefile                 # Automation targets (build, test, lint, bench)
+└── .github/workflows/       # CI pipelines
 ```
 
-## Development
+---
 
-### Prerequisites
+## Contributing
 
-- Go 1.26+
-- `golangci-lint` (optional, for `make lint`)
-
-### Commands
-
-| Command | Description |
-|---------|-------------|
-| `make build` | Build the proxy binary to `build/kervan-proxy` |
-| `make test` | Run all tests with race detector |
-| `make lint` | Run golangci-lint (falls back to `go vet`) |
-| `make bench` | Run all benchmarks |
-| `make fmt` | Format all Go source files |
-| `make clean` | Remove build artifacts |
-
-### Monitoring (optional)
-
-Enable PostgreSQL-backed monitoring with the `monitoring` build tag:
-
-```sh
-make build-monitoring
-# or directly:
-go build -tags monitoring ./cmd/kervan-proxy
-```
-
-## Scenarios
-
-| # | Scenario | Description |
-|---|----------|-------------|
-| S1 | Basic Stream Relay | Pipeline starts OPEN, traffic flows as passthrough |
-| S2 | Circuit Breaking | Target fails → Valve HELD → payloads buffer → target recovers → Drain → OPEN |
-| S3 | Backpressure | Sanctuary near capacity → DropOldest or RejectNew |
-| S4 | Cascading Failure | Target dies during DRAINING → revert to HELD, buffer preserved |
-| S5 | Zombie Source | Source disconnects while HELD → pipeline drains and cleans up |
+Contributions are welcome! Please review [CONTRIBUTING.md](CONTRIBUTING.md) to get started with local development setups, coding conventions, and pull request workflows.
 
 ## License
 
-MIT
+This project is licensed under the MIT License - see [LICENSE](LICENSE) for details.
