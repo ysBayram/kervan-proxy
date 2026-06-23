@@ -114,6 +114,19 @@ func (s *ProxyServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	s.runPipelines(clientReader, clientWriter, upConn, upConn)
 }
 
+type cancelReader struct {
+	r      io.Reader
+	cancel context.CancelFunc
+}
+
+func (cr *cancelReader) Read(p []byte) (int, error) {
+	n, err := cr.r.Read(p)
+	if err != nil {
+		cr.cancel()
+	}
+	return n, err
+}
+
 func (s *ProxyServer) runPipelines(
 	clientReader io.Reader, clientWriter io.Writer,
 	upReader io.Reader, upWriter io.Writer,
