@@ -530,3 +530,26 @@ Initial phases focused on functional correctness (valve transitions, pipeline or
 | Pipeline `Pop()` → `PopTo()` | Write-direct API | Eliminates per-item allocation for the hot drain path; existing `Pop()` retained for API consumers needing byte ownership |
 | `ValveController` interface | Use concrete `valve.ValveState` | String-based abstraction required runtime string→enum mapping in every implementation; concrete type eliminates mapping at negligible coupling cost |
 | `activeConns` WaitGroup | Not wired (decision reversed) | WebSocket `ReadMessage` blocks without context awareness; `activeConns.Wait()` would deadlock on shutdown; proper fix requires `SetReadDeadline` or connection-level interruption — deferred to future work |
+
+### Docker Infrastructure
+
+**Goal:** Containerised deployment and local development workflow via Docker and Docker Compose.
+
+#### Files
+
+| File | Purpose |
+|------|---------|
+| `Dockerfile` | Multi-stage build: `golang:1.26-alpine` builder → `alpine:3.21` runtime; `BUILD_TAGS` build-arg for monitoring variant |
+| `docker-compose.yml` | Three profiles: `default` (standalone proxy), `dev` (proxy + TCP echo server), `monitoring` (proxy + PostgreSQL) |
+| `.dockerignore` | Excludes `build/`, `.git/`, `*.md`, `.env` from Docker context |
+
+#### Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Base image | `alpine:3.21` (not distroless) | ca-certificates + tzdata pre-installed; shell access for debugging |
+| Build tag passthrough | `--build-arg BUILD_TAGS=monitoring` | Single Dockerfile builds both standard and monitoring variants |
+| Echo server | `python:3.13-alpine` with inline socketserver | Zero project code needed; fully self-contained in compose |
+| PostgreSQL volume | Named volume `pgdata` | Persists across restarts; no host path coupling |
+| Profile isolation | Three compose profiles | Clean separation; no conditional `depends_on` tangles |
+| Default upstream | `host.docker.internal:9000` | Points to host loopback by default; overridable via `UPSTREAM` env |

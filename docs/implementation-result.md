@@ -142,9 +142,51 @@ $ make lint
 | Interceptor `Evaluate` concurrent safety | Data race (unsafe slice read) | Safe (snapshot copy under mutex) | Overhead: 1 slice allocation per Evaluate call |
 | EventBus `Close` | Panic on second call | No-op after first call | `sync.Once` overhead: atomic load after initialisation |
 
-### Git Status
+### Docker Infrastructure
+
+**Goal:** Containerised deployment and local development workflow.
+
+#### Created Files
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `Dockerfile` | 18 | Multi-stage Go build → Alpine runtime; `BUILD_TAGS` arg for monitoring |
+| `docker-compose.yml` | 89 | Three profiles: `default`, `dev`, `monitoring` |
+| `.dockerignore` | 6 | Minimal Docker context |
+
+#### Verification
+
+```sh
+$ docker build -t kervan-proxy .
+[+] Building ... successfully tagged kervan-proxy:latest
+
+$ docker build --build-arg BUILD_TAGS=monitoring -t kervan-proxy:monitoring .
+[+] Building ... successfully tagged kervan-proxy:monitoring
+
+$ docker compose --profile dev config --services
+echo-server
+kervan-proxy
+
+$ docker compose --profile monitoring config --services
+kervan-proxy-monitoring
+postgres
+```
+
+#### Design Rationale
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Runtime base | `alpine:3.21` | 5.5 MB layer; ca-certificates + tzdata for TLS/timezone support |
+| Build stage base | `golang:1.26-alpine` | Matches project Go version; minimal image |
+| Profile isolation | 3 compose profiles | `default` for production, `dev` adds echo server, `monitoring` adds postgres |
+| PostgreSQL volume | Named `pgdata` | Persists across restarts without host path coupling |
+| Echo server | Python inline socketserver | Zero new code; fully self-contained in compose |
+| Upstream default | `host.docker.internal:9000` | Routes to host loopback; works on Docker Desktop (macOS/Windows) |
+
+### Git Status (Phase 10 final)
 
 ```
-14 modified files (unstaged)
-159 insertions, 73 deletions across 6 packages
+18 files changed across 7 packages + 3 new files
+New files: Dockerfile, docker-compose.yml, .dockerignore
+Commits: 14 (audit fixes) + 4 (Docker infrastructure) = 18 total on feature/p10-audit-and-hardening
 ```
