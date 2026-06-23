@@ -56,10 +56,12 @@ func (s *ProxyServer) Start() error {
 	if err != nil {
 		return fmt.Errorf("server: listen %s: %w", s.cfg.ListenAddr, err)
 	}
+	s.tcpListener = httpListener
 
 	s.httpServer = &http.Server{
-		Handler:     mux,
-		ReadTimeout: s.cfg.ReadTimeout,
+		Handler:      mux,
+		ReadTimeout:  s.cfg.ReadTimeout,
+		WriteTimeout: s.cfg.WriteTimeout,
 	}
 
 	go func() {
@@ -134,15 +136,18 @@ func (s *ProxyServer) runPipelines(
 	ctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
 
+	wrappedClientReader := &cancelReader{r: clientReader, cancel: cancel}
+	wrappedUpReader := &cancelReader{r: upReader, cancel: cancel}
+
 	sancCap := s.cfg.SanctuaryCap
 	if sancCap <= 0 {
 		sancCap = 10000
 	}
 
-	ingress := pipeline.NewPipeline(clientReader, upWriter,
+	ingress := pipeline.NewPipeline(wrappedClientReader, upWriter,
 		pipeline.WithSanctuaryCapacity(sancCap),
 	)
-	egress := pipeline.NewPipeline(upReader, clientWriter,
+	egress := pipeline.NewPipeline(wrappedUpReader, clientWriter,
 		pipeline.WithSanctuaryCapacity(sancCap),
 	)
 
