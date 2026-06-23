@@ -62,7 +62,41 @@ make build
     --max-connections 10000
 ```
 
-### 2. Testing WebSocket Bridging
+### 2. Docker Compose (Recommended)
+
+Run the proxy with all defaults (listens on `:8080`, forwards to `host.docker.internal:9000`):
+
+```sh
+docker compose up
+```
+
+With a TCP echo server for local development:
+
+```sh
+docker compose --profile dev up
+```
+
+With PostgreSQL monitoring enabled:
+
+```sh
+docker compose --profile monitoring up
+```
+
+### 3. Building the Docker Image
+
+Build the standard image:
+
+```sh
+docker build -t kervan-proxy .
+```
+
+Build with PostgreSQL monitoring support:
+
+```sh
+docker build --build-arg BUILD_TAGS=monitoring -t kervan-proxy:monitoring .
+```
+
+### 4. Testing WebSocket Bridging
 
 Since Kervan-Proxy upgrades connections on `/ws` to WebSocket and bridges them to a raw TCP upstream:
 
@@ -78,7 +112,14 @@ websocat ws://localhost:8080/ws
 # Type any text and watch it arrive on the TCP backend (Terminal 1)
 ```
 
-### 3. Health Check Telemetry
+With the `dev` Docker Compose profile, the echo server is already running:
+
+```sh
+websocat ws://localhost:8080/ws
+# Type any text and it echoes back
+```
+
+### 5. Health Check Telemetry
 
 Query the server stats:
 
@@ -165,6 +206,59 @@ export DATABASE_URL="postgres://postgres:password@localhost:5432/kervan?sslmode=
 
 ---
 
+## Docker Development Guide
+
+### Profiles Overview
+
+The `docker-compose.yml` defines three profiles for different workflows:
+
+| Profile | Services | Use Case |
+|---------|----------|----------|
+| `default` | `kervan-proxy` | Standalone proxy for production or integration testing |
+| `dev` | `kervan-proxy` + `echo-server` | Local development with a TCP echo server |
+| `monitoring` | `kervan-proxy-monitoring` + `postgres` | Proxy with PostgreSQL event recording |
+
+### Dev Profile — WebSocket ↔ TCP Echo
+
+Start the proxy alongside a TCP echo server:
+
+```sh
+docker compose --profile dev up
+```
+
+The echo server listens on `:9000` and replies with whatever it receives. The proxy forwards WebSocket traffic from `ws://localhost:8080/ws` to the echo server:
+
+```sh
+websocat ws://localhost:8080/ws
+> hello
+< hello
+```
+
+### Monitoring Profile — PostgreSQL Event Recording
+
+Start the proxy with PostgreSQL-backed telemetry:
+
+```sh
+docker compose --profile monitoring up
+```
+
+This starts a PostgreSQL 16 instance (data persisted in `pgdata` named volume) and the proxy binary compiled with the `monitoring` build tag. All pipeline events (valve transitions, backpressure actions, disconnections) are recorded in the `pipeline_events`, `backpressure_events`, and `disruption_sessions` tables. The recorder automatically runs schema migrations on startup.
+
+### Docker Compose Configuration
+
+The `kervan-proxy` service accepts the same environment variables listed in the [Configuration Reference](#configuration-reference). Override any value with an `environment` block:
+
+```yaml
+services:
+  kervan-proxy:
+    environment:
+      - LISTEN=:9090
+      - CAPACITY=5000
+      - BACKPRESSURE=reject_new
+```
+
+---
+
 ## Project Structure
 
 ```
@@ -179,6 +273,8 @@ export DATABASE_URL="postgres://postgres:password@localhost:5432/kervan?sslmode=
 ├── sql/migrations/          # Database migrations for telemetry
 ├── docs/                    # Architectural documents and design specifications
 ├── Makefile                 # Automation targets (build, test, lint, bench)
+├── Dockerfile               # Multi-stage Docker image build
+├── docker-compose.yml       # Docker Compose with 3 profiles
 └── .github/workflows/       # CI pipelines
 ```
 
