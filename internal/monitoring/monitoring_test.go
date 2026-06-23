@@ -88,7 +88,7 @@ func TestMonitorRecordNonBlocking(t *testing.T) {
 
 func TestNoopRecorder(t *testing.T) {
 	bus := NewEventBus(10)
-	r := NewRecorder(bus)
+	r := NewRecorder(bus, "")
 
 	if err := r.Start(context.Background()); err != nil {
 		t.Fatal(err)

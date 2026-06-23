@@ -6,7 +6,7 @@ import "context"
 
 type noopRecorder struct{}
 
-func NewRecorder(_ *EventBus) Recorder {
+func NewRecorder(_ *EventBus, _ string) Recorder {
 	return &noopRecorder{}
 }
 
