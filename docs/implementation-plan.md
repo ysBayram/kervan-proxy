@@ -490,3 +490,43 @@ flowchart LR
 | P8: Tooling & CI | 1 day | Makefile, linter, CI, docs |
 | P9: Proxy Server | 2 days | TCP/WS proxy with 10K concurrent connections |
 | **Total** | **~18 days** | |
+
+---
+
+## Post-Implementation Audit & Hardening (Phase 10)
+
+**Goal:** Systematic codebase-wide audit for concurrency safety, resource leaks, CPU efficiency, and code quality, with fixes applied by risk priority.
+
+### Motivation
+
+Initial phases focused on functional correctness (valve transitions, pipeline orchestration, interceptor evaluation). Production-readiness requires deeper verification of concurrent access patterns, goroutine lifecycle hygiene, and runtime efficiency. This phase closes those gaps without changing the public API.
+
+### Detected Issues
+
+| # | Category | Risk | Component | Problem |
+|---|----------|------|-----------|---------|
+| 1 | Concurrency | 🔴 CRITICAL | `internal/valve/valve.go` — `TransitionTo` | TOCTOU race: `v.State()` called twice allows stale-state CAS |
+| 2 | CPU | 🔴 CRITICAL | `internal/pipeline/pipeline.go` — `executionLoop` | Busy-spin at 100% CPU in HELD state (tight `for{select{default}}` loop) |
+| 3 | Safety | 🔴 CRITICAL | `internal/monitoring/eventbus.go` — `Close()` | Double-`close(ch)` causes runtime panic |
+| 4 | Concurrency | 🔴 CRITICAL | `internal/interceptor/interceptor.go` — `AddRule` / `Evaluate` | Unprotected slice access causes data race |
+| 5 | Resource | 🔴 CRITICAL | `internal/monitoring/recorder_pgx.go` — `batchLoop` | Goroutine leak: `Stop()` closes `r.done` but `batchLoop` never listens on it |
+| 6 | Resource | 🟠 HIGH | `internal/monitoring/recorder_pgx.go` — `Start()` | Pool assigned before migration; closed pool reference on migration failure |
+| 7 | Resource | 🟠 HIGH | `internal/server/proxy.go` — `runPipelines` | Circular ctx-dependency blocks shutdown on client disconnect |
+| 8 | Resource | 🟠 HIGH | `internal/server/proxy.go` — `tcpListener` | Never assigned to struct field; `Stop()`'s nil-check is dead code |
+| 9 | Config | 🟡 MEDIUM | `internal/server/proxy.go` — `http.Server` | `WriteTimeout` defined in Config but never set on server |
+| 10 | Performance | 🟡 MEDIUM | `internal/pipeline/pipeline.go` — `ingestionLoop` | Per-read `make([]byte, n)` allocation on every Read |
+| 11 | Performance | 🟡 MEDIUM | `internal/sanctuary/sanctuary.go` — `Pop()` | Per-Pop allocation bypassing pool benefit |
+| 12 | Design | 🔵 LOW | `internal/interceptor/actions.go` — `ValveController` | String-based interface incompatible with concrete `valve.ValveState` |
+| 13 | Quality | 🔵 LOW | `internal/server/proxy_test.go` — `TestConnectionLimit` | Limit value set but never validated with exceeded attempt |
+
+### Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Shutdown signalling for `runPipelines` | `cancelReader` (wrapper) | Wraps `io.Reader` to call `context.CancelFunc` on read error; clean separation — pipeline remains agnostic of lifecycle management |
+| Busy-loop mitigation | `time.After(10ms)` in HELD state | 100 edges/s max yields negligible CPU (≈0.1% per goroutine); preserves responsiveness without notification channel complexity |
+| Rule-chain thread safety | Snapshot-copy under mutex | `evaluate` copies the rule slice once, then evaluates predicates/actions outside lock; prevents long-running actions from blocking `AddRule` |
+| EventBus double-close | `sync.Once` | Zero-dependency, standard library solution; minimal overhead (atomic load after first call) |
+| Pipeline `Pop()` → `PopTo()` | Write-direct API | Eliminates per-item allocation for the hot drain path; existing `Pop()` retained for API consumers needing byte ownership |
+| `ValveController` interface | Use concrete `valve.ValveState` | String-based abstraction required runtime string→enum mapping in every implementation; concrete type eliminates mapping at negligible coupling cost |
+| `activeConns` WaitGroup | Not wired (decision reversed) | WebSocket `ReadMessage` blocks without context awareness; `activeConns.Wait()` would deadlock on shutdown; proper fix requires `SetReadDeadline` or connection-level interruption — deferred to future work |
