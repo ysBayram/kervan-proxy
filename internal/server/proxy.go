@@ -14,8 +14,10 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/ysBayram/kervan-proxy/internal/interceptor"
 	"github.com/ysBayram/kervan-proxy/internal/pipeline"
 	"github.com/ysBayram/kervan-proxy/internal/sanctuary"
+	"github.com/ysBayram/kervan-proxy/internal/valve"
 )
 
 type ProxyServer struct {
@@ -104,16 +106,11 @@ func (s *ProxyServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer wsConn.Close()
 
-	upConn, err := s.dialUpstream()
-	if err != nil {
-		log.Printf("server: upstream dial error: %v", err)
-		wsConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "upstream unavailable"))
-		return
-	}
-	defer upConn.Close()
+	ru := NewResilientUpstream(s.ctx, s.cfg.UpstreamAddr, s.cfg.UpstreamTimeout)
+	defer ru.Close()
 
 	clientReader, clientWriter := newWSAdapter(wsConn)
-	s.runPipelines(clientReader, clientWriter, upConn, upConn)
+	s.runPipelines(clientReader, clientWriter, ru, ru)
 }
 
 type cancelReader struct {
@@ -154,6 +151,21 @@ func (s *ProxyServer) runPipelines(
 	s.configureBackpressure(ingress)
 	s.configureBackpressure(egress)
 
+	if ru, ok := upWriter.(*ResilientUpstream); ok {
+		if !ru.IsConnected() {
+			ingress.Valve().TransitionTo(valve.HELD)
+		}
+		ingress.RegisterRule(interceptor.Rule{
+			Name: "reconnect-and-drain",
+			Predicate: func() bool {
+				return ru.IsConnected() && ingress.Valve().State() == valve.HELD
+			},
+			Action: func() {
+				ingress.Valve().TransitionTo(valve.DRAINING)
+			},
+		})
+	}
+
 	if err := ingress.Start(); err != nil {
 		log.Printf("server: ingress start error: %v", err)
 		return
@@ -193,11 +205,6 @@ func (s *ProxyServer) acquireConn() bool {
 
 func (s *ProxyServer) releaseConn() {
 	s.connCounter.Add(-1)
-}
-
-func (s *ProxyServer) dialUpstream() (net.Conn, error) {
-	dialer := net.Dialer{Timeout: s.cfg.UpstreamTimeout}
-	return dialer.DialContext(s.ctx, "tcp", s.cfg.UpstreamAddr)
 }
 
 func (s *ProxyServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
