@@ -22,10 +22,11 @@ func (v *Valve) State() ValveState {
 }
 
 func (v *Valve) TransitionTo(target ValveState) error {
-	if !v.State().CanTransitionTo(target) {
+	current := v.State()
+	if !current.CanTransitionTo(target) {
 		return ErrInvalidTransition
 	}
-	if !atomic.CompareAndSwapInt32(&v.state, int32(v.State()), int32(target)) {
+	if !atomic.CompareAndSwapInt32(&v.state, int32(current), int32(target)) {
 		return ErrInvalidTransition
 	}
 	return nil

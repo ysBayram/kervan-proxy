@@ -40,6 +40,7 @@ flowchart TD
     P7["Phase 7: Monitoring & Analytics (PostgreSQL)"]
     P8["Phase 8: Dev Tooling & CI"]
     P9["Phase 9: TCP/WebSocket Proxy Server"]
+    P10["Phase 10: Post-Implementation Audit, Hardening & Resilient Reconnection"]
 
     P1 --> P2
     P1 --> P3
@@ -50,6 +51,7 @@ flowchart TD
     P6 --> P7
     P7 --> P8
     P8 --> P9
+    P9 --> P10
 ```
 
 ---
@@ -489,4 +491,80 @@ flowchart LR
 | **P7: Monitoring** | **3 days** | **Async + PostgreSQL observability** |
 | P8: Tooling & CI | 1 day | Makefile, linter, CI, docs |
 | P9: Proxy Server | 2 days | TCP/WS proxy with 10K concurrent connections |
-| **Total** | **~18 days** | |
+| P10: Audit, Hardening & Reconnection | 5 days | Concurrency, leaks, memory optimizations, and upstream auto-reconnect |
+| **Total** | **~23 days** | |
+
+---
+
+## Phase 10: Post-Implementation Audit, Hardening & Resilient Reconnection
+
+**Goal:** Perform systematic codebase-wide audit (concurrency safety, CPU efficiency, resource leaks) and implement transparent reconnect and client buffering on target backend failure in the HTTP/WebSocket proxy server.
+
+### Motivation
+
+Initial phases focused on functional correctness (valve transitions, pipeline orchestration, interceptor evaluation). Production-readiness requires deeper verification of concurrent access patterns, goroutine lifecycle hygiene, and runtime efficiency. This phase closes those gaps without changing the public API.
+
+### Subtasks
+
+| # | Subtask | Acceptance Criteria |
+|---|---------|---------------------|
+| 10.1 | Create `ResilientUpstream` wrapper | Thread-safe `ResilientUpstream` wrapping `net.Conn` with background reconnect loop and blocking `Read`. |
+| 10.2 | Integrate `ResilientUpstream` into `ProxyServer` | Replace static upstream dial in `handleWS` and register state transition rules on `ingress` pipeline. |
+| 10.3 | Implement integration tests for reconnection | Test successful connection during downtime, buffering, and auto-drain on backend recovery. |
+| 10.4 | Concurrency audits & fixes | Eliminate TOCTOU state checking in Valve FSM; protect Interceptor chain from concurrent access; safe EventBus closing. |
+| 10.5 | Lifecycle & leak audits | Solve goroutine leak in pgx recorder; prevent pipeline execution busy-spin via time yield in HELD state. |
+| 10.6 | Performance & resource optimizations | Integrate sync.Pool buffer allocations directly into pipeline hot paths via PopTo. |
+| 10.7 | Containerization infrastructure | Construct production multi-stage Dockerfile and dev compose environment with mock services. |
+
+### Detected Issues
+
+| # | Category | Risk | Component | Problem |
+|---|----------|------|-----------|---------|
+| 1 | Concurrency | 🔴 CRITICAL | `internal/valve/valve.go` — `TransitionTo` | TOCTOU race: `v.State()` called twice allows stale-state CAS |
+| 2 | CPU | 🔴 CRITICAL | `internal/pipeline/pipeline.go` — `executionLoop` | Busy-spin at 100% CPU in HELD state (tight `for{select{default}}` loop) |
+| 3 | Safety | 🔴 CRITICAL | `internal/monitoring/eventbus.go` — `Close()` | Double-`close(ch)` causes runtime panic |
+| 4 | Concurrency | 🔴 CRITICAL | `internal/interceptor/interceptor.go` — `AddRule` / `Evaluate` | Unprotected slice access causes data race |
+| 5 | Resource | 🔴 CRITICAL | `internal/monitoring/recorder_pgx.go` — `batchLoop` | Goroutine leak: `Stop()` closes `r.done` but `batchLoop` never listens on it |
+| 6 | Resource | 🟠 HIGH | `internal/monitoring/recorder_pgx.go` — `Start()` | Pool assigned before migration; closed pool reference on migration failure |
+| 7 | Resource | 🟠 HIGH | `internal/server/proxy.go` — `runPipelines` | Circular ctx-dependency blocks shutdown on client disconnect |
+| 8 | Resource | 🟠 HIGH | `internal/server/proxy.go` — `tcpListener` | Never assigned to struct field; `Stop()`'s nil-check is dead code |
+| 9 | Config | 🟡 MEDIUM | `internal/server/proxy.go` — `http.Server` | `WriteTimeout` defined in Config but never set on server |
+| 10 | Performance | 🟡 MEDIUM | `internal/pipeline/pipeline.go` — `ingestionLoop` | Per-read `make([]byte, n)` allocation on every Read |
+| 11 | Performance | 🟡 MEDIUM | `internal/sanctuary/sanctuary.go` — `Pop()` | Per-Pop allocation bypassing pool benefit |
+| 12 | Design | 🔵 LOW | `internal/interceptor/actions.go` — `ValveController` | String-based interface incompatible with concrete `valve.ValveState` |
+| 13 | Quality | 🔵 LOW | `internal/server/proxy_test.go` — `TestConnectionLimit` | Limit value set but never validated with exceeded attempt |
+
+### Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Shutdown signalling for `runPipelines` | `cancelReader` (wrapper) | Wraps `io.Reader` to call `context.CancelFunc` on read error; clean separation — pipeline remains agnostic of lifecycle management |
+| Busy-loop mitigation | `time.After(10ms)` in HELD state | 100 edges/s max yields negligible CPU (≈0.1% per goroutine); preserves responsiveness without notification channel complexity |
+| Rule-chain thread safety | Snapshot-copy under mutex | `evaluate` copies the rule slice once, then evaluates predicates/actions outside lock; prevents long-running actions from blocking `AddRule` |
+| EventBus double-close | `sync.Once` | Zero-dependency, standard library solution; minimal overhead (atomic load after first call) |
+| Pipeline `Pop()` → `PopTo()` | Write-direct API | Eliminates per-item allocation for the hot drain path; existing `Pop()` retained for API consumers needing byte ownership |
+| `ValveController` interface | Use concrete `valve.ValveState` | String-based abstraction required runtime string→enum mapping in every implementation; concrete type eliminates mapping at negligible coupling cost |
+| `activeConns` WaitGroup | Not wired (decision reversed) | WebSocket `ReadMessage` blocks without context awareness; `activeConns.Wait()` would deadlock on shutdown; proper fix requires `SetReadDeadline` or connection-level interruption — deferred to future work |
+
+### Docker Infrastructure
+
+**Goal:** Containerised deployment and local development workflow via Docker and Docker Compose.
+
+#### Files
+
+| File | Purpose |
+|------|---------|
+| `Dockerfile` | Multi-stage build: `golang:1.26-alpine` builder → `alpine:3.21` runtime; `BUILD_TAGS` build-arg for monitoring variant |
+| `docker-compose.yml` | Three profiles: `default` (standalone proxy), `dev` (proxy + TCP echo server), `monitoring` (proxy + PostgreSQL) |
+| `.dockerignore` | Excludes `build/`, `.git/`, `*.md`, `.env` from Docker context |
+
+#### Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Base image | `alpine:3.21` (not distroless) | ca-certificates + tzdata pre-installed; shell access for debugging |
+| Build tag passthrough | `--build-arg BUILD_TAGS=monitoring` | Single Dockerfile builds both standard and monitoring variants |
+| Echo server | `python:3.13-alpine` with inline socketserver | Zero project code needed; fully self-contained in compose |
+| PostgreSQL volume | Named volume `pgdata` | Persists across restarts; no host path coupling |
+| Profile isolation | Three compose profiles | Clean separation; no conditional `depends_on` tangles |
+| Default upstream | `host.docker.internal:9000` | Points to host loopback by default; overridable via `UPSTREAM` env |

@@ -5,6 +5,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/ysBayram/kervan-proxy/internal/valve"
 )
 
 func TestEvaluateFiresOnTruePredicate(t *testing.T) {
@@ -177,12 +179,12 @@ func TestSanctuaryUsageAboveZeroCapacity(t *testing.T) {
 }
 
 func TestTransitionValveToAction(t *testing.T) {
-	v := &mockValve{state: "OPEN"}
+	v := &mockValve{state: valve.OPEN}
 
 	action := TransitionValveTo(v, "HELD")
 	action()
 
-	if v.state != "HELD" {
+	if v.state != valve.HELD {
 		t.Fatalf("expected HELD, got %s", v.state)
 	}
 }
@@ -226,7 +228,7 @@ func TestInterceptorChainRulesOrder(t *testing.T) {
 }
 
 func TestS2ErrorThresholdToHeld(t *testing.T) {
-	v := &mockValve{state: "OPEN"}
+	v := &mockValve{state: valve.OPEN}
 	errCounter := NewCounter(0)
 
 	ic := NewInterceptorChain()
@@ -242,7 +244,7 @@ func TestS2ErrorThresholdToHeld(t *testing.T) {
 
 	ic.EvaluateEvent(Event{Type: EventTargetFailure})
 
-	if v.state != "OPEN" {
+	if v.state != valve.OPEN {
 		t.Fatal("expected still OPEN below threshold")
 	}
 
@@ -250,13 +252,13 @@ func TestS2ErrorThresholdToHeld(t *testing.T) {
 
 	ic.EvaluateEvent(Event{Type: EventTargetFailure})
 
-	if v.state != "HELD" {
+	if v.state != valve.HELD {
 		t.Fatal("expected HELD after threshold reached")
 	}
 }
 
 func TestS2HeldToDrainingToOpen(t *testing.T) {
-	v := &mockValve{state: "HELD"}
+	v := &mockValve{state: valve.HELD}
 
 	ic := NewInterceptorChain()
 	var healthChecks int32
@@ -270,13 +272,13 @@ func TestS2HeldToDrainingToOpen(t *testing.T) {
 
 	atomic.StoreInt32(&healthChecks, 1)
 	ic.Evaluate()
-	if v.state != "HELD" {
+	if v.state != valve.HELD {
 		t.Fatal("expected still HELD before 2 health checks")
 	}
 
 	atomic.StoreInt32(&healthChecks, 2)
 	ic.Evaluate()
-	if v.state != "DRAINING" {
+	if v.state != valve.DRAINING {
 		t.Fatal("expected DRAINING after healthy checks")
 	}
 
@@ -292,7 +294,7 @@ func TestS2HeldToDrainingToOpen(t *testing.T) {
 
 	clearS2 = true
 	drainIC.Evaluate()
-	if v.state != "OPEN" {
+	if v.state != valve.OPEN {
 		t.Fatal("expected OPEN after drain complete")
 	}
 }
@@ -326,16 +328,16 @@ func TestS3BackpressureOnUsageThreshold(t *testing.T) {
 
 type mockValve struct {
 	mu    sync.Mutex
-	state string
+	state valve.ValveState
 }
 
-func (v *mockValve) State() string {
+func (v *mockValve) State() valve.ValveState {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	return v.state
 }
 
-func (v *mockValve) TransitionTo(target string) error {
+func (v *mockValve) TransitionTo(target valve.ValveState) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.state = target

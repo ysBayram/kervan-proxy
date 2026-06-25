@@ -6,6 +6,7 @@ import (
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ysBayram/kervan-proxy/internal/interceptor"
 	"github.com/ysBayram/kervan-proxy/internal/sanctuary"
@@ -137,15 +138,12 @@ func (p *Pipeline) ingestionLoop() {
 			return
 		}
 
-		data := make([]byte, n)
-		copy(data, buf[:n])
-
 		st := p.valve.State()
 		switch st {
 		case valve.OPEN:
-			if _, err := p.target.Write(data); err != nil {
+			if _, err := p.target.Write(buf[:n]); err != nil {
 				p.emitEvent("target_failure", map[string]any{"error": err.Error()})
-				p.sanctuary.Push(data)
+				p.sanctuary.Push(buf[:n])
 				p.valve.TransitionTo(valve.HELD)
 				p.emitEvent("valve_transition", map[string]any{
 					"from": "OPEN",
@@ -153,7 +151,7 @@ func (p *Pipeline) ingestionLoop() {
 				})
 			}
 		case valve.HELD, valve.DRAINING:
-			if err := p.sanctuary.Push(data); err != nil {
+			if err := p.sanctuary.Push(buf[:n]); err != nil {
 				action := p.cfg.BackpressureAction
 				if action == sanctuary.RejectNew {
 					p.emitEvent("backpressure", map[string]any{
@@ -170,7 +168,7 @@ func (p *Pipeline) ingestionLoop() {
 						"reason": err.Error(),
 					})
 					p.sanctuary.DropOldest()
-					p.sanctuary.Push(data)
+					p.sanctuary.Push(buf[:n])
 				}
 			}
 		}
@@ -192,6 +190,11 @@ func (p *Pipeline) executionLoop() {
 		switch st {
 		case valve.HELD:
 			p.intercepts.Evaluate()
+			select {
+			case <-time.After(10 * time.Millisecond):
+			case <-p.ctx.Done():
+				return
+			}
 			continue
 
 		case valve.DRAINING:
@@ -202,7 +205,7 @@ func (p *Pipeline) executionLoop() {
 					return
 				default:
 				}
-				data, ok := p.sanctuary.Pop()
+				_, err, ok := p.sanctuary.PopTo(p.target)
 				if !ok {
 					if err := p.valve.TransitionTo(valve.OPEN); err != nil {
 						return
@@ -213,7 +216,7 @@ func (p *Pipeline) executionLoop() {
 					})
 					break
 				}
-				if _, err := p.target.Write(data); err != nil {
+				if err != nil {
 					p.emitEvent("target_failure", map[string]any{"error": err.Error()})
 					if err := p.valve.TransitionTo(valve.HELD); err != nil {
 						return

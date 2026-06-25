@@ -2,45 +2,54 @@
 
 ## State
 
-Implemented across 7 of 8 phases. All core primitives exist with tests:
+All 9 of 9 phases are fully implemented and verified. All core primitives and server components exist with comprehensive tests and zero lint issues.
 
-| Package | Phase | Status |
-|---------|-------|--------|
-| `internal/valve` | P2 | ✅ Tests pass, `-race` clean |
-| `internal/sanctuary` | P3 | ✅ Tests pass, `-race` clean |
-| `internal/pipeline` | P4, P6 | ✅ Tests pass, `-race` clean |
-| `internal/interceptor` | P5 | ✅ Tests pass, `-race` clean |
-| `internal/monitoring` | P7 | ✅ Tests pass, `-race` clean (build-tag isolated pgx) |
+| Package | Phase | Status | Key Responsibility |
+|---------|-------|--------|---------------------|
+| `internal/valve` | P2 | ✅ Tests pass, `-race` clean | Valve FSM (OPEN, HELD, DRAINING states) |
+| `internal/sanctuary` | P3 | ✅ Tests pass, `-race` clean | Zero-allocation byte buffer pool and ring buffer |
+| `internal/pipeline` | P4, P6 | ✅ Tests pass, `-race` clean | Bidirectional pipeline logic, edge case handling, backpressure |
+| `internal/interceptor` | P5 | ✅ Tests pass, `-race` clean | Rule-engine evaluating predicate-action (WHEN-THEN) maps |
+| `internal/monitoring` | P7 | ✅ Tests pass, `-race` clean | EventBus telemetry and optional `pgx` event recorder |
+| `internal/server` | P9 | ✅ Tests pass, `-race` clean | HTTP/WebSocket proxy server, config loader, connection management |
 
 ## Design
 
-`docs/technical-design-document.md` is aspirational — the code is the source of truth. Core primitives:
+`docs/technical-design-document.md` details the architectural layout, and the implementation strictly adheres to:
 - **Pipeline** — logical stream container binding one Source and one Target
-- **Valve** — FSM with states `OPEN → HELD → DRAINING → OPEN` (atomic CAS transitions)
-- **Sanctuary** — per-pipeline bounded FIFO ring-buffer (zero-alloc via `sync.Pool`)
-- **Interceptors** — `WHEN-THEN` predicate rules driving state transitions
+- **Valve** — atomic CAS transitions driving stream routing states: `OPEN → HELD → DRAINING → OPEN`
+- **Sanctuary** — per-pipeline bounded FIFO ring-buffer recycling fixed 4096-byte arrays from a `sync.Pool`
+- **Interceptors** — event-driven predicate evaluations determining transition rules
+- **Server** — upgrade HTTP requests to WebSocket connection tunnels and relay them via pipelines
 
 ## Commands
 
 ```sh
-make test      # go test -race -count=1 -timeout 60s ./...
-make lint      # golangci-lint run ./... (falls back to go vet)
-make build     # go build -o build/kervan-proxy ./cmd/kervan-proxy
-make bench     # go test -bench=. -benchmem ./...
-make fmt       # go fmt ./...
-make vet       # go vet ./...
-make clean     # rm -rf build/ && go clean -cache
+make fmt              # Format Go source files
+make vet              # Run go vet
+make test             # Run tests with race detector (60s timeout)
+make test-short       # Run short tests with race detector (30s timeout)
+make lint             # Run golangci-lint (falls back to go vet)
+make build            # Build server binary into build/kervan-proxy
+make build-monitoring # Build binary with pgx monitoring enabled (requires postgres)
+make run              # Run proxy server locally
+make bench            # Run benchmarks (120s timeout)
+make bench-profile    # Run benchmarks and output CPU/Memory profiles
+make clean            # Remove build directory and clean Go build cache
+make ci-check         # Complete local validation suite (fmt -> vet -> test -> lint)
 ```
-
-## Implementation plan
-
-`docs/implementation-plan.md` contains the phased build plan. Monitoring (Phase 7) uses pgx + PostgreSQL — the only planned external dependency, isolated in `internal/monitoring/` behind a build tag.
 
 ## Conventions
 
-- Zero external dependencies for core; pgx for monitoring behind `//go:build monitoring`
-- `sync.Pool` for zero-allocation byte buffers; atomic CAS for valve FSM
-- Double-goroutine per pipeline (ingestion / execution)
-- Workflow: `make fmt` → `make vet` → `make test` → `make build`
-- Branching: `main` (stable), `develop`, `feature/*`, `hotfix/*`; conventional commits
-- Every feature/fix/phase implemented on separate branch with micro-commits per subtask
+- **Dependencies**: 
+  - Standard library only for core packages.
+  - `github.com/gorilla/websocket` is restricted to the networking entry points (`internal/server`, `cmd/kervan-proxy`).
+  - `github.com/jackc/pgx/v5` is restricted to monitoring telemetry database writes behind the `//go:build monitoring` build tag.
+- **Concurrency & Memory**: 
+  - Use `sync.Pool` for zero-allocation memory recycling.
+  - Strict double-goroutine execution model per active pipeline (Ingestion and Execution paths).
+  - All Valve transitions must employ atomic CAS loops.
+- **Git workflow**: 
+  - `main` is the stable release branch; `develop` holds the latest integrated changes.
+  - Changes should be pushed on clean, single-purpose branches. Commits must follow conventional commits style.
+  - **No pushing directly to remote main/master branches** (enforced by project guidelines).

@@ -1,8 +1,10 @@
 package interceptor
 
+import "github.com/ysBayram/kervan-proxy/internal/valve"
+
 type ValveController interface {
-	State() string
-	TransitionTo(target string) error
+	State() valve.ValveState
+	TransitionTo(target valve.ValveState) error
 }
 
 type BackpressureController interface {
@@ -11,9 +13,20 @@ type BackpressureController interface {
 	DropOldest() ([]byte, bool)
 }
 
-func TransitionValveTo(valve ValveController, target string) func() {
+func TransitionValveTo(vc ValveController, target string) func() {
 	return func() {
-		_ = valve.TransitionTo(target)
+		var state valve.ValveState
+		switch target {
+		case "OPEN":
+			state = valve.OPEN
+		case "HELD":
+			state = valve.HELD
+		case "DRAINING":
+			state = valve.DRAINING
+		default:
+			return
+		}
+		_ = vc.TransitionTo(state)
 	}
 }
 

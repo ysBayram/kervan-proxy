@@ -2,6 +2,7 @@ package monitoring
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 )
 
@@ -10,6 +11,8 @@ type EventBus struct {
 	dropped atomic.Int64
 	queued  atomic.Int64
 	cap     int
+
+	closeOnce sync.Once
 }
 
 func NewEventBus(capacity int) *EventBus {
@@ -33,7 +36,9 @@ func (eb *EventBus) Subscribe() <-chan Event {
 }
 
 func (eb *EventBus) Close() {
-	close(eb.ch)
+	eb.closeOnce.Do(func() {
+		close(eb.ch)
+	})
 }
 
 func (eb *EventBus) Dropped() int64 {
