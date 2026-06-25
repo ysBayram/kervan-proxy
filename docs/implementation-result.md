@@ -2,7 +2,7 @@
 
 ## Summary
 
-All 9 phases implemented across 37 commits on 9 feature branches, all merged into `develop`. Every test passes with `-race`, `go vet` clean, `golangci-lint` clean.
+All 10 phases implemented across 68 commits on 10 feature branches, all merged into `develop` (or active feature branch). Every test passes with `-race`, `go vet` clean, `golangci-lint` clean.
 
 ```
 $ make ci-check
@@ -25,16 +25,17 @@ golangci-lint run ./...                      → 0 issues
 | P7: Monitoring | 6 | `event.go`, `eventbus.go`, `recorder.go`, `recorder_noop.go`, `recorder_pgx.go`, `analytics.go`, migration SQL | EventBus, Monitor, Recorder, benchmarks (18ns pub) | ✅ |
 | P8: Dev tooling & CI | 3 | `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml`, `README.md`, `AGENTS.md` | `make fmt` → `vet` → `test` → `lint` → `build` | ✅ |
 | P9: Proxy server | 5 | `config.go`, `wsadapter.go`, `proxy.go`, `proxy_test.go`, `main.go` | health check, WS echo, connection limit | ✅ |
+| P10: Audit, Hardening & Reconnection | 20 | `resilient_conn.go`, `resilient_conn_test.go`, `Dockerfile`, `docker-compose.yml`, 14 Go files | Valve CAS, busy-spin, data races, Docker, auto-reconnect, buffering | ✅ |
 
 ## Test Results
 
 ```
-ok  internal/interceptor  1.278s
-ok  internal/monitoring   1.525s
-ok  internal/pipeline     4.670s
-ok  internal/sanctuary    1.709s
-ok  internal/server       1.958s
-ok  internal/valve        1.892s
+ok  internal/interceptor  1.659s
+ok  internal/monitoring   1.479s
+ok  internal/pipeline     5.177s
+ok  internal/sanctuary    2.317s
+ok  internal/server       3.937s
+ok  internal/valve        2.887s
 ```
 
 ## Benchmarks
@@ -57,7 +58,8 @@ main (not yet merged)
     ├── feature/p6-edge-cases
     ├── feature/p7-monitoring
     ├── feature/p8-devtooling-ci
-    └── feature/p9-proxy-server
+    ├── feature/p9-proxy-server
+    └── feature/p10-audit-and-hardening
 ```
 
 ## Current State
@@ -65,22 +67,22 @@ main (not yet merged)
 - **Zero external dependencies** for core (stdlib only)
 - **gorilla/websocket v1.5.3** for WebSocket proxy — `cmd/` layer only
 - **pgx v5.10.0** for monitoring, isolated behind `//go:build monitoring` build tag
-- **41 tests** across 5 packages with `-race` clean
+- **42 tests** across 6 packages with `-race` clean
 - **`make ci-check`** runs the full pipeline: fmt → vet → test → lint
-- **Proxy capabilities**: TCP relay, WebSocket `/ws`, health check `/healthz`, configurable backpressure, connection limiting, graceful shutdown
+- **Proxy capabilities**: TCP relay, WebSocket `/ws`, health check `/healthz`, configurable backpressure, connection limiting, graceful shutdown, transparent reconnection and buffering on backend outage
 
 ---
 
-## Phase 10: Post-Implementation Audit & Hardening
+## Phase 10: Post-Implementation Audit, Hardening & Resilient Reconnection
 
 ### Scope
 
-Systematic review of 14 Go source files across 6 packages. Changes span concurrency safety, CPU efficiency, crash prevention, resource lifecycle, and code quality.
+Systematic review of 14 Go source files across 6 packages for concurrency safety, resource leaks, CPU efficiency, and containerization. Additionally, this phase introduces connection persistence and automatic buffering for WebSocket proxy clients during target upstream outages, replaying data seamlessly in FIFO sequence once connection recovers.
 
-### Applied Fixes
+### Applied Fixes & Changes
 
-| # | File | Change | Risk Reduction |
-|---|------|--------|----------------|
+| # | File | Change | Objective / Risk Reduction |
+|---|------|--------|----------------------------|
 | 1 | `internal/valve/valve.go` | `TransitionTo`: single `v.State()` read for both `CanTransitionTo` and CAS | Eliminates TOCTOU window where stale state drives CAS |
 | 2 | `internal/pipeline/pipeline.go` | `executionLoop`: `time.After(10ms)` in HELD state select | Busy-spin → ≈100 polls/s; CPU usage drops from ≈100% to ≈0.1% per idle pipeline |
 | 3 | `internal/monitoring/eventbus.go` | `Close()` guarded by `sync.Once` | Double-close panic eliminated |
@@ -94,10 +96,13 @@ Systematic review of 14 Go source files across 6 packages. Changes span concurre
 | 11 | `internal/interceptor/interceptor_test.go` | `mockValve` updated to `valve.ValveState` types | Tests compile and pass with new interface |
 | 12 | `internal/pipeline/edge_test.go` | `TestGracefulShutdownDuringDrain`: drain window 20ms→50ms | Accommodates 10ms polling interval in HELD state |
 | 13 | `internal/server/proxy_test.go` | `TestConnectionLimit`: removed stale connCounter assertion | Test reflects actual behaviour (health endpoint doesn't track connections) |
+| 14 | `internal/server/resilient_conn.go` | Created `ResilientUpstream` wrapping `net.Conn` with background reconnect loop | Blocks egress `Read` on disconnect, retry connecting every 1s, preventing pipeline teardown |
+| 15 | `internal/server/proxy.go` | Integrated `ResilientUpstream` and added rule `reconnect-and-drain` to proxy pipeline | Automatic valve state transition between `HELD` and `DRAINING` on backend recovery |
+| 16 | `internal/server/resilient_conn_test.go` | Implemented end-to-end integration tests for reconnection and buffering | Validates connection during downtime, buffering, and auto-draining |
 
 ### Pre-existing Changes (separate work)
 
-These changes were present in the working tree before the phase 10 audit and are documented for completeness:
+These changes were present in the working tree before the audit and are documented for completeness:
 
 | File | Change |
 |------|--------|
@@ -107,21 +112,21 @@ These changes were present in the working tree before the phase 10 audit and are
 | `internal/monitoring/monitoring_test.go` | `NewRecorder` call updated to pass empty `dbURL` |
 | `internal/sanctuary/sanctuary.go` | Added `PopTo(w io.Writer)` method for zero-allocation drain path |
 
-### Test Results (post-fix)
+### Test Results
 
 ```
 $ make test
 go test -race -count=1 -timeout 60s ./...
 ?   	github.com/ysBayram/kervan-proxy/cmd/kervan-proxy	[no test files]
-ok  	github.com/ysBayram/kervan-proxy/internal/interceptor	1.561s
-ok  	github.com/ysBayram/kervan-proxy/internal/monitoring	1.865s
-ok  	github.com/ysBayram/kervan-proxy/internal/pipeline	5.466s
-ok  	github.com/ysBayram/kervan-proxy/internal/sanctuary	1.909s
-ok  	github.com/ysBayram/kervan-proxy/internal/server	2.834s
-ok  	github.com/ysBayram/kervan-proxy/internal/valve	2.806s
+ok  	github.com/ysBayram/kervan-proxy/internal/interceptor	1.659s
+ok  	github.com/ysBayram/kervan-proxy/internal/monitoring	1.479s
+ok  	github.com/ysBayram/kervan-proxy/internal/pipeline	5.177s
+ok  	github.com/ysBayram/kervan-proxy/internal/sanctuary	2.317s
+ok  	github.com/ysBayram/kervan-proxy/internal/server	3.937s
+ok  	github.com/ysBayram/kervan-proxy/internal/valve	2.887s
 ```
 
-All 6 test suites pass with `-race` detector enabled — zero data races.
+All test suites pass with `-race` detector enabled — zero data races.
 
 ### Lint
 
@@ -177,7 +182,7 @@ postgres
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | Runtime base | `alpine:3.21` | 5.5 MB layer; ca-certificates + tzdata for TLS/timezone support |
-| Build stage base | `golang:1.26-alpine` | Matches project Go version; minimal image |
+| Build stage base | `golang:1.26-alpine` | Matches Go version; minimal image |
 | Profile isolation | 3 compose profiles | `default` for production, `dev` adds echo server, `monitoring` adds postgres |
 | PostgreSQL volume | Named `pgdata` | Persists across restarts without host path coupling |
 | Echo server | Python inline socketserver | Zero new code; fully self-contained in compose |
@@ -186,7 +191,7 @@ postgres
 ### Git Status (Phase 10 final)
 
 ```
-18 files changed across 7 packages + 3 new files
-New files: Dockerfile, docker-compose.yml, .dockerignore
-Commits: 14 (audit fixes) + 4 (Docker infrastructure) = 18 total on feature/p10-audit-and-hardening
+20 files changed across 7 packages + 5 new files
+New files: Dockerfile, docker-compose.yml, .dockerignore, resilient_conn.go, resilient_conn_test.go
+Commits: 14 (audit fixes) + 4 (Docker) + 2 (Resilient Connection) = 20 total on feature/p10-audit-and-hardening
 ```

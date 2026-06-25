@@ -40,6 +40,7 @@ flowchart TD
     P7["Phase 7: Monitoring & Analytics (PostgreSQL)"]
     P8["Phase 8: Dev Tooling & CI"]
     P9["Phase 9: TCP/WebSocket Proxy Server"]
+    P10["Phase 10: Post-Implementation Audit, Hardening & Resilient Reconnection"]
 
     P1 --> P2
     P1 --> P3
@@ -50,6 +51,7 @@ flowchart TD
     P6 --> P7
     P7 --> P8
     P8 --> P9
+    P9 --> P10
 ```
 
 ---
@@ -489,17 +491,30 @@ flowchart LR
 | **P7: Monitoring** | **3 days** | **Async + PostgreSQL observability** |
 | P8: Tooling & CI | 1 day | Makefile, linter, CI, docs |
 | P9: Proxy Server | 2 days | TCP/WS proxy with 10K concurrent connections |
-| **Total** | **~18 days** | |
+| P10: Audit, Hardening & Reconnection | 5 days | Concurrency, leaks, memory optimizations, and upstream auto-reconnect |
+| **Total** | **~23 days** | |
 
 ---
 
-## Post-Implementation Audit & Hardening (Phase 10)
+## Phase 10: Post-Implementation Audit, Hardening & Resilient Reconnection
 
-**Goal:** Systematic codebase-wide audit for concurrency safety, resource leaks, CPU efficiency, and code quality, with fixes applied by risk priority.
+**Goal:** Perform systematic codebase-wide audit (concurrency safety, CPU efficiency, resource leaks) and implement transparent reconnect and client buffering on target backend failure in the HTTP/WebSocket proxy server.
 
 ### Motivation
 
 Initial phases focused on functional correctness (valve transitions, pipeline orchestration, interceptor evaluation). Production-readiness requires deeper verification of concurrent access patterns, goroutine lifecycle hygiene, and runtime efficiency. This phase closes those gaps without changing the public API.
+
+### Subtasks
+
+| # | Subtask | Acceptance Criteria |
+|---|---------|---------------------|
+| 10.1 | Create `ResilientUpstream` wrapper | Thread-safe `ResilientUpstream` wrapping `net.Conn` with background reconnect loop and blocking `Read`. |
+| 10.2 | Integrate `ResilientUpstream` into `ProxyServer` | Replace static upstream dial in `handleWS` and register state transition rules on `ingress` pipeline. |
+| 10.3 | Implement integration tests for reconnection | Test successful connection during downtime, buffering, and auto-drain on backend recovery. |
+| 10.4 | Concurrency audits & fixes | Eliminate TOCTOU state checking in Valve FSM; protect Interceptor chain from concurrent access; safe EventBus closing. |
+| 10.5 | Lifecycle & leak audits | Solve goroutine leak in pgx recorder; prevent pipeline execution busy-spin via time yield in HELD state. |
+| 10.6 | Performance & resource optimizations | Integrate sync.Pool buffer allocations directly into pipeline hot paths via PopTo. |
+| 10.7 | Containerization infrastructure | Construct production multi-stage Dockerfile and dev compose environment with mock services. |
 
 ### Detected Issues
 
