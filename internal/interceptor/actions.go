@@ -10,7 +10,7 @@ type ValveController interface {
 type BackpressureController interface {
 	Len() int
 	Cap() int
-	DropOldest() ([]byte, bool)
+	DropOldest() bool
 }
 
 func TransitionValveTo(vc ValveController, target string) func() {

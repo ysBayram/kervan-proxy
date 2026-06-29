@@ -352,8 +352,8 @@ type mockSanctuary struct {
 
 func (s *mockSanctuary) Len() int { return s.length }
 func (s *mockSanctuary) Cap() int { return s.capacity }
-func (s *mockSanctuary) DropOldest() ([]byte, bool) {
+func (s *mockSanctuary) DropOldest() bool {
 	s.dropped++
 	s.length--
-	return nil, true
+	return true
 }

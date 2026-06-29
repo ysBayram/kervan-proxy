@@ -128,12 +128,8 @@ func TestSanctuaryDropOldest(t *testing.T) {
 	s.Push([]byte("first"))
 	s.Push([]byte("second"))
 
-	dropped, ok := s.DropOldest()
-	if !ok {
+	if !s.DropOldest() {
 		t.Fatal("expected DropOldest to succeed")
-	}
-	if string(dropped) != "first" {
-		t.Fatalf("expected 'first' dropped, got %q", string(dropped))
 	}
 	if s.Len() != 1 {
 		t.Fatalf("expected Len=1 after drop, got %d", s.Len())
