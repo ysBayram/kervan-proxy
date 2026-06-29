@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -24,6 +25,7 @@ type ResilientUpstream struct {
 	mu               sync.Mutex
 	conn             net.Conn
 	connected        bool
+	reconnecting     atomic.Bool
 	cond             *sync.Cond
 	reconnectStarted time.Time
 }
@@ -45,6 +47,8 @@ func NewResilientUpstream(ctx context.Context, addr string, dialTimeout time.Dur
 }
 
 func (ru *ResilientUpstream) reconnectLoop() {
+	defer ru.reconnecting.Store(false)
+
 	ru.mu.Lock()
 	ru.reconnectStarted = time.Now()
 	ru.mu.Unlock()
@@ -113,7 +117,9 @@ func (ru *ResilientUpstream) Read(p []byte) (int, error) {
 					ru.conn.Close()
 					ru.conn = nil
 				}
-				go ru.reconnectLoop()
+				if ru.reconnecting.CompareAndSwap(false, true) {
+					go ru.reconnectLoop()
+				}
 			}
 			ru.mu.Unlock()
 			continue
@@ -141,7 +147,9 @@ func (ru *ResilientUpstream) Write(p []byte) (int, error) {
 				ru.conn.Close()
 				ru.conn = nil
 			}
-			go ru.reconnectLoop()
+			if ru.reconnecting.CompareAndSwap(false, true) {
+				go ru.reconnectLoop()
+			}
 		}
 		ru.mu.Unlock()
 		return n, err
