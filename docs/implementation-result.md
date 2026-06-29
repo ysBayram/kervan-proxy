@@ -2,7 +2,7 @@
 
 ## Summary
 
-All 11 phases implemented across 72+ commits on 12 feature branches, all merged into `develop` (or active feature branch). Every test passes with `-race`, `go vet` clean, `golangci-lint` clean.
+All 12 phases implemented across 82+ commits on 13 feature branches, all merged into `develop` (or active feature branch). Every test passes with `-race`, `go vet` clean, `golangci-lint` clean.
 
 ```
 $ make ci-check
@@ -27,6 +27,7 @@ golangci-lint run ./...                      → 0 issues
 | P9: Proxy server | 5 | `config.go`, `wsadapter.go`, `proxy.go`, `proxy_test.go`, `main.go` | health check, WS echo, connection limit | ✅ |
 | P10: Audit, Hardening & Reconnection | 20 | `resilient_conn.go`, `resilient_conn_test.go`, `Dockerfile`, `docker-compose.yml`, 14 Go files | Valve CAS, busy-spin, data races, Docker, auto-reconnect, buffering | ✅ |
 | P11: Graceful Shutdown & Resilience | 7 | `wsadapter.go`, `proxy.go`, `resilient_conn.go`, `pipeline.go`, `sanctuary.go`, `config.go`, `actions.go` | WS ping/pong, reconnect timeout, graceful shutdown, drop_connection, drain timeout, constants | ✅ |
+| P12: Code Review Fixes | 10 | `recorder_pgx.go`, `proxy.go`, `state.go`, `pipeline.go`, `resilient_conn.go`, `wsadapter.go`, `sanctuary.go`, `eventbus.go`, `Makefile`, `.golangci.yml` | nil-pointer, data race, busy-spin, deadlock, allocation, publish-after-close | ✅ |
 
 ## Test Results
 
@@ -61,15 +62,17 @@ main (not yet merged)
     ├── feature/p8-devtooling-ci
     ├── feature/p9-proxy-server
     ├── feature/p10-audit-and-hardening
-    └── feature/p11-graceful-shutdown-websocket-proxy (active)
+    ├── feature/p11-graceful-shutdown-websocket-proxy
+    └── feature/p12-code-review-fixes (active)
 ```
 
 ## Current State
 
+- **12 phases** completed across 82+ commits on 13 feature branches
 - **Zero external dependencies** for core (stdlib only)
 - **gorilla/websocket v1.5.3** for WebSocket proxy — `cmd/` layer only
 - **pgx v5.10.0** for monitoring, isolated behind `//go:build monitoring` build tag
-- **44 tests** across 6 packages with `-race` clean
+- **50 tests** across 6 packages with `-race` clean
 - **`make ci-check`** runs the full pipeline: fmt → vet → test → lint
 - **Proxy capabilities**: TCP relay, WebSocket `/ws`, health check `/healthz`, configurable backpressure, connection limiting, graceful shutdown, transparent reconnection and buffering on backend outage
 
@@ -257,3 +260,74 @@ $ make lint
   2eca5e5 feat(p11): update tests for phase 11 API changes
   60dca9a feat(p11): extract hardcoded values into named constants
 ```
+
+---
+
+## Phase 12: Code Review Fixes
+
+### Scope
+
+Systematic application of findings from the code review report: eliminate nil-pointer derefs, data races, busy-spins, allocation hotspots, and concurrency safety issues across the entire codebase. Constrain the existing feature set with micro-commits; no new features.
+
+### Changes
+
+| # | File | Change | Objective |
+|---|------|--------|-----------|
+| 1 | `internal/monitoring/recorder_pgx.go` | Moved `r.pool = pool` before `runMigrations()` | Prevent nil-pointer deref in migration (monitoring build tag startup crash) |
+| 2 | `internal/server/proxy.go` | Separate monotonically incrementing `connIDSeq` for connection IDs | Eliminate ID collisions from dual-use `connCounter` (both limit + ID) |
+| 3 | `internal/valve/state.go` | Added `OPEN → DRAINING` to `validTransitions` matrix; `pipeline.go` `Stop()` uses `CanTransitionTo` + single transition | Eliminates two-step STOP→HELD→DRAINING; shutdown path uses single FSM transition |
+| 4 | `internal/server/resilient_conn.go` | Set `ru.connected = false` in `Close()` | Prevent nil conn reads on callers polling `connected` flag |
+| 5 | `internal/pipeline/pipeline.go` | Added `openPollInterval = 100ms` + `select` block in OPEN state | Eliminates busy-spin in OPEN execution loop |
+| 6 | `internal/server/wsadapter.go` | Added `SetWriteDeadline(time.Now().Add(writeWait))` before `WriteMessage` | Prevent indefinite block on WS write to dead client |
+| 7 | `internal/server/proxy.go` | Moved `activeConns.Add(1)` before `activeWSConns.Store` | Eliminate data race from Store-then-Add interleaving |
+| 8 | `internal/server/resilient_conn.go` | Added `reconnecting atomic.Bool` guard with CAS around `go reconnectLoop()` | Prevent multiple concurrent reconnect goroutines |
+| 9 | `internal/sanctuary/sanctuary.go` | Changed `var blockSize = 4096` to `const blockSize = 4096`; `DropOldest()` no longer returns data (signature `bool` instead of `([]byte, bool)`) | Eliminates allocation in backpressure drop path; callers already discard return value |
+| 10 | `Makefile`, `.golangci.yml` | Added `fmt-check` target; `go mod tidy`; restored default linter set (no custom disable) | CI catches unformatted files; dependency tree clean; linter config aligned with v2 defaults |
+| 11 | `internal/monitoring/eventbus.go` | Added `closed atomic.Bool` guard in `Publish()`; set before `close(eb.ch)` in `Close()` | Prevent send on closed channel panic |
+| 12 | `docs/implementation-result.md` | Added this section | Phase 12 documentation |
+
+### Test Results
+
+```
+$ make test
+go test -race -count=1 -timeout 60s ./...
+ok  	github.com/ysBayram/kervan-proxy/internal/interceptor	1.199s
+ok  	github.com/ysBayram/kervan-proxy/internal/monitoring	1.519s
+ok  	github.com/ysBayram/kervan-proxy/internal/pipeline	4.699s
+ok  	github.com/ysBayram/kervan-proxy/internal/sanctuary	1.731s
+ok  	github.com/ysBayram/kervan-proxy/internal/server	4.252s
+ok  	github.com/ysBayram/kervan-proxy/internal/valve	2.071s
+```
+
+All test suites pass with `-race` detector enabled — zero data races.
+
+### Lint
+
+```
+$ make lint
+0 issues.
+```
+
+### Git Log
+
+```
+5f3bf5d fix(p12): swap pool assignment before migration in recorder_pgx (12.1)
+9691671 fix(p12): separate connID from connCounter; reorder Add/Store (12.2+12.7)
+50bcc4b fix(p12): add OPEN→DRAINING to valve FSM; fix Stop() drain transition check (12.3)
+fd0fb7f fix(p12): set ru.connected=false in Close to prevent nil conn reads (12.4)
+4105a35 fix(p12): add openPollInterval=100ms to eliminate OPEN state busy-spin (12.5)
+e771fb6 fix(p12): add SetWriteDeadline to wsWriter.Write to prevent indefinite block (12.6)
+b6af796 fix(p12): prevent multiple concurrent reconnectLoop goroutines via atomic guard (12.8)
+74c221a fix(p12): change blockSize to const; make DropOldest allocation-free (no return data) (12.9)
+22e4515 chore(p12): add fmt-check target to Makefile; clean up .golangci.yml; go mod tidy (12.10)
+53b15b2 fix(p12): add atomic closed guard in Publish to prevent send on closed channel (12.11)
+```
+
+### Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| OPEN→DRAINING FSM transition added rather than two-step STOP→HELD→DRAINING | Cleaner shutdown path; single atomic CAS instead of two |
+| Separate `connIDSeq` (`atomic.Int64`) for IDs instead of UUID | Minimal overhead; no allocation; guaranteed monotonic uniqueness without import cost |
+| `DropOldest()` return type changed from `([]byte, bool)` to `bool` | All callers discard the returned data; removing allocation saves one heap alloc per backpressure eviction |
+| `reconnecting` atomic guard instead of mutex for reconnect serialization | CAS is lock-free; no contention with the existing `mu` used for conn state |

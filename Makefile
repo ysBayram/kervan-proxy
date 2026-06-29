@@ -55,4 +55,4 @@ clean:
 run:
 	go run ./cmd/$(APP_NAME)
 
-ci-check: fmt vet test lint
+ci-check: fmt-check vet test lint
