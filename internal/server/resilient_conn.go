@@ -11,24 +11,27 @@ import (
 )
 
 type ResilientUpstream struct {
-	addr        string
-	dialTimeout time.Duration
-	ctx         context.Context
-	cancel      context.CancelFunc
+	addr             string
+	dialTimeout      time.Duration
+	reconnectTimeout time.Duration
+	ctx              context.Context
+	cancel           context.CancelFunc
 
-	mu        sync.Mutex
-	conn      net.Conn
-	connected bool
-	cond      *sync.Cond
+	mu               sync.Mutex
+	conn             net.Conn
+	connected        bool
+	cond             *sync.Cond
+	reconnectStarted time.Time
 }
 
-func NewResilientUpstream(ctx context.Context, addr string, timeout time.Duration) *ResilientUpstream {
+func NewResilientUpstream(ctx context.Context, addr string, dialTimeout time.Duration, reconnectTimeout time.Duration) *ResilientUpstream {
 	parentCtx, cancel := context.WithCancel(ctx)
 	ru := &ResilientUpstream{
-		addr:        addr,
-		dialTimeout: timeout,
-		ctx:         parentCtx,
-		cancel:      cancel,
+		addr:             addr,
+		dialTimeout:      dialTimeout,
+		reconnectTimeout: reconnectTimeout,
+		ctx:              parentCtx,
+		cancel:           cancel,
 	}
 	ru.cond = sync.NewCond(&ru.mu)
 
@@ -38,6 +41,10 @@ func NewResilientUpstream(ctx context.Context, addr string, timeout time.Duratio
 }
 
 func (ru *ResilientUpstream) reconnectLoop() {
+	ru.mu.Lock()
+	ru.reconnectStarted = time.Now()
+	ru.mu.Unlock()
+
 	for {
 		select {
 		case <-ru.ctx.Done():
@@ -58,6 +65,19 @@ func (ru *ResilientUpstream) reconnectLoop() {
 		}
 
 		log.Printf("resilient-upstream: connection to %s failed: %v. Retrying in 1s...", ru.addr, err)
+
+		ru.mu.Lock()
+		timeout := ru.reconnectTimeout
+		started := ru.reconnectStarted
+		ru.mu.Unlock()
+
+		if timeout > 0 && time.Since(started) >= timeout {
+			log.Printf("resilient-upstream: reconnect timeout (%v) exceeded for %s, giving up", timeout, ru.addr)
+			// Cancel context to trigger full pipeline shutdown
+			ru.cancel()
+			return
+		}
+
 		select {
 		case <-ru.ctx.Done():
 			return
