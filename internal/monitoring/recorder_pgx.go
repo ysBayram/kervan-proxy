@@ -27,20 +27,19 @@ func NewRecorder(bus *EventBus, dbURL string) Recorder {
 }
 
 func (r *pgxRecorder) Start(ctx context.Context) error {
-	connStr := r.dbURL
-	if connStr == "" {
-		connStr = "postgres://localhost:5432/kervan?sslmode=disable"
+	if r.dbURL == "" {
+		return fmt.Errorf("monitoring: database URL is required")
 	}
-	pool, err := pgxpool.New(ctx, connStr)
+	pool, err := pgxpool.New(ctx, r.dbURL)
 	if err != nil {
 		return fmt.Errorf("monitoring: unable to connect to postgres: %w", err)
 	}
+	r.pool = pool
 
 	if err := r.runMigrations(ctx); err != nil {
 		pool.Close()
 		return fmt.Errorf("monitoring: migration failed: %w", err)
 	}
-	r.pool = pool
 
 	go r.batchLoop(ctx)
 	return nil
