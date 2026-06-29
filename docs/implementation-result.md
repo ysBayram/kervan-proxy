@@ -26,7 +26,7 @@ golangci-lint run ./...                      → 0 issues
 | P8: Dev tooling & CI | 3 | `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml`, `README.md`, `AGENTS.md` | `make fmt` → `vet` → `test` → `lint` → `build` | ✅ |
 | P9: Proxy server | 5 | `config.go`, `wsadapter.go`, `proxy.go`, `proxy_test.go`, `main.go` | health check, WS echo, connection limit | ✅ |
 | P10: Audit, Hardening & Reconnection | 20 | `resilient_conn.go`, `resilient_conn_test.go`, `Dockerfile`, `docker-compose.yml`, 14 Go files | Valve CAS, busy-spin, data races, Docker, auto-reconnect, buffering | ✅ |
-| P11: Graceful Shutdown & Resilience | 6 | `wsadapter.go`, `proxy.go`, `resilient_conn.go`, `pipeline.go`, `sanctuary.go`, `config.go` | WS ping/pong, reconnect timeout, graceful shutdown, drop_connection, drain timeout | ✅ |
+| P11: Graceful Shutdown & Resilience | 7 | `wsadapter.go`, `proxy.go`, `resilient_conn.go`, `pipeline.go`, `sanctuary.go`, `config.go`, `actions.go` | WS ping/pong, reconnect timeout, graceful shutdown, drop_connection, drain timeout, constants | ✅ |
 
 ## Test Results
 
@@ -218,6 +218,10 @@ Add production-grade keepalive, bounded reconnection, graceful shutdown with dra
 | 6 | `internal/pipeline/pipeline.go` | `DropConnection` handling in `ingestionLoop` — calls `p.cancel()` and returns on full sanctuary | Connection-level backpressure instead of dropping data |
 | 7 | `internal/pipeline/pipeline.go` | `Stop(drainTimeout)` — drain phase transitions valve to DRAINING, polls sanctuary empty with 5ms ticker, hard stop on timeout | Bounded graceful drain of in-flight data before hard shutdown |
 | 8 | `internal/server/config.go` | `ReconnectTimeout`, `ShutdownDrainTimeout` fields with flags/env vars (defaults: 30s) | Configurable timeouts |
+| 9 | `internal/pipeline/pipeline.go` | Added `defaultSanctuaryCapacity`, `defaultReadBufferSize`, `drainPollInterval`, `heldPollInterval` constants; replaced valve state strings with `valve.X.String()` | Eliminates 6 magic numbers/strings; self-documenting intent |
+| 10 | `internal/interceptor/actions.go` | Replaced `"OPEN"`/`"HELD"`/`"DRAINING"` switch cases with `valve.X.String()` | Eliminates 3 duplicated string literals |
+| 11 | `internal/server/proxy.go` | Added `wsEndpoint`, `healthEndpoint`, `networkTCP`, `defaultSancCap`, `defaultWSBufSize` constants; replaced backpressure switch strings with `sanctuary.X.String()` | Eliminates 7 magic values across route paths, network type, backpressure modes, buffer sizes |
+| 12 | `internal/server/resilient_conn.go` | Added `reconnectRetryDelay` constant; replaced `"tcp"` with shared `networkTCP` | Single source of truth for retry interval and network type |
 
 ### Test Results
 
@@ -244,11 +248,12 @@ $ make lint
 ### Git Status (Phase 11)
 
 ```
-6 commits on feature/p11-graceful-shutdown-websocket-proxy:
+7 commits on feature/p11-graceful-shutdown-websocket-proxy:
   0644442 feat(p11): add WebSocket ping/pong keepalive mechanism
   7fa469c feat(p11): add bounded reconnect timeout to ResilientUpstream
   4a04a20 feat(p11): implement graceful server shutdown with active connection tracking
   121f531 feat(p11): add drop_connection backpressure mode
   1583eec feat(p11): add shutdown drain timeout to pipeline Stop
   2eca5e5 feat(p11): update tests for phase 11 API changes
+  60dca9a feat(p11): extract hardcoded values into named constants
 ```
