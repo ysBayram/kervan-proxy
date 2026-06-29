@@ -18,6 +18,7 @@ const (
 	defaultReadBufferSize    = 4096
 	drainPollInterval        = 5 * time.Millisecond
 	heldPollInterval         = 10 * time.Millisecond
+	openPollInterval         = 100 * time.Millisecond
 )
 
 type Config struct {
@@ -279,6 +280,11 @@ func (p *Pipeline) executionLoop() {
 				return
 			}
 			p.intercepts.Evaluate()
+			select {
+			case <-time.After(openPollInterval):
+			case <-p.ctx.Done():
+				return
+			}
 		}
 	}
 }
