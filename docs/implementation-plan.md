@@ -492,7 +492,8 @@ flowchart LR
 | P8: Tooling & CI | 1 day | Makefile, linter, CI, docs |
 | P9: Proxy Server | 2 days | TCP/WS proxy with 10K concurrent connections |
 | P10: Audit, Hardening & Reconnection | 5 days | Concurrency, leaks, memory optimizations, and upstream auto-reconnect |
-| **Total** | **~23 days** | |
+| P11: WebSocket Resilience | 3 days | Ping/pong, bounded reconnect, graceful shutdown, drain timeout, drop_connection |
+| **Total** | **~26 days** | |
 
 ---
 
@@ -544,7 +545,7 @@ Initial phases focused on functional correctness (valve transitions, pipeline or
 | EventBus double-close | `sync.Once` | Zero-dependency, standard library solution; minimal overhead (atomic load after first call) |
 | Pipeline `Pop()` → `PopTo()` | Write-direct API | Eliminates per-item allocation for the hot drain path; existing `Pop()` retained for API consumers needing byte ownership |
 | `ValveController` interface | Use concrete `valve.ValveState` | String-based abstraction required runtime string→enum mapping in every implementation; concrete type eliminates mapping at negligible coupling cost |
-| `activeConns` WaitGroup | Not wired (decision reversed) | WebSocket `ReadMessage` blocks without context awareness; `activeConns.Wait()` would deadlock on shutdown; proper fix requires `SetReadDeadline` or connection-level interruption — deferred to future work |
+| `activeConns` WaitGroup | Wired in Phase 11 via `SetReadDeadline` | Phase 10 deferred this; Phase 11 adds read deadline + `activeConns.Add/Done` to enable graceful shutdown without deadlock |
 
 ### Docker Infrastructure
 
@@ -568,3 +569,52 @@ Initial phases focused on functional correctness (valve transitions, pipeline or
 | PostgreSQL volume | Named volume `pgdata` | Persists across restarts; no host path coupling |
 | Profile isolation | Three compose profiles | Clean separation; no conditional `depends_on` tangles |
 | Default upstream | `host.docker.internal:9000` | Points to host loopback by default; overridable via `UPSTREAM` env |
+
+---
+
+## Phase 11: WebSocket Resilience, Graceful Shutdown & Reconnect Timeout
+
+**Goal:** Production-harden the WebSocket proxy server with connection keepalive (ping/pong), bounded reconnection attempts, graceful connection draining on shutdown, and configurable backpressure disconnect strategy.
+
+### Motivation
+
+Phase 10 introduced the `ResilientUpstream` with infinite reconnect loop, but left several production gaps: (1) WebSocket connections have no application-level keepalive, so half-open TCP states go undetected; (2) a permanently unreachable backend holds client connections open forever; (3) server shutdown is a hard cut with no drain coordination; (4) buffer saturation silently drops data with no connection-level signal.
+
+### Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Ping/pong interval | 30s ping, 60s read deadline | Standard WebSocket keepalive; allows 2 missed pings before timeout |
+| Reconnect timeout | Configurable (default 30s) | Bounded reconnect prevents zombie connections; configurable per deployment |
+| Shutdown drain timeout | Configurable (default 30s) | Allows buffered data to flush to upstream before hard stop |
+| Buffer overflow on saturation | `drop_connection` (new mode) | Replaces silent data loss with explicit connection termination; client can reconnect |
+| WS read deadline for graceful stop | `SetReadDeadline` on shutdown | Breaks `ReadMessage` block so `activeConns.Wait()` can complete without deadlock |
+
+### User Stories
+
+| # | Story | Description |
+|---|-------|-------------|
+| **U1** | **Connection Keepalive** | As an operator, I want WebSocket connections to be automatically terminated when the client silently disappears, so that zombie connections do not accumulate. |
+| **U2** | **Bounded Reconnect** | As an operator, I want client connections to be closed when the upstream backend is unreachable for a configurable timeout, so that resources are not held indefinitely. |
+| **U3** | **Graceful Shutdown** | As an operator, I want the proxy to drain in-flight data and wait for active connections to finish when shutting down, so that no data is lost during deployment restarts. |
+| **U4** | **Buffer Overflow Disconnect** | As a developer, I want the proxy to close the connection when the buffer overflows instead of silently dropping data, so that the client can make an explicit reconnection decision. |
+| **U5** | **Shutdown Drain Timeout** | As an operator, I want the proxy to attempt draining remaining buffered data for a configurable duration before force-stopping, so that upstream receives as much data as possible during rolling updates. |
+
+### Subtasks
+
+| # | Subtask | Component | Acceptance Criteria |
+|---|---------|-----------|---------------------|
+| 11.1 | **WebSocket Ping/Pong** | `internal/server/wsadapter.go` | Proxy sends ping every 30s; pong handler resets deadline; 60s read timeout triggers connection close. |
+| 11.2 | **Reconnect Timeout** | `internal/server/resilient_conn.go`, `internal/server/config.go` | New `ReconnectTimeout` field (default 30s). `ResilientUpstream` starts timer on first failure; if timer expires before reconnection, pipeline context is cancelled and client connection is released. |
+| 11.3 | **Graceful Server Shutdown** | `internal/server/proxy.go`, `internal/server/wsadapter.go` | `activeConns` WaitGroup properly wired (`Add`/`Done`). WS `SetReadDeadline` on shutdown breaks `ReadMessage` block. `httpServer.Shutdown` used instead of `Close`. |
+| 11.4 | **Buffer Overflow Drop Connection** | `internal/pipeline/pipeline.go`, `internal/sanctuary/sanctuary.go`, `internal/server/config.go` | New `DropConnection` backpressure action. When buffer is full and action is `DropConnection`, pipeline cancels its context → pipeline stops → client connection closes. Config flag `--backpressure=drop_connection`. |
+| 11.5 | **Shutdown Drain Timeout** | `internal/pipeline/pipeline.go`, `internal/server/proxy.go`, `internal/server/config.go` | `Pipeline.Stop(timeout)` attempts drain for up to `ShutdownDrainTimeout` (default 30s) before hard cancel. Execution loop respects drain context during DRAINING state. |
+| 11.6 | **Integration Tests** | `internal/server/proxy_test.go`, `internal/pipeline/edge_test.go` | Tests for ping/pong timeout, reconnect timeout expiry, graceful shutdown with active connections, drop_connection backpressure mode, drain timeout cancellation. All pass with `-race`. |
+| 11.7 | **Config & Flag Updates** | `internal/server/config.go` | New flags: `--reconnect-timeout`, `--shutdown-drain-timeout`. Backpressure flag accepts `drop_connection`. |
+
+### Summary Timeline Update
+
+| Phase | Est. Duration | Key Deliverable |
+|-------|---------------|-----------------|
+| P11: WebSocket Resilience | 3 days | Ping/pong, bounded reconnect, graceful shutdown, drain timeout, drop_connection |
+| **Total** | **~26 days** | |
