@@ -2,7 +2,7 @@
 
 ## Summary
 
-All 10 phases implemented across 68 commits on 10 feature branches, all merged into `develop` (or active feature branch). Every test passes with `-race`, `go vet` clean, `golangci-lint` clean.
+All 11 phases implemented across 72+ commits on 12 feature branches, all merged into `develop` (or active feature branch). Every test passes with `-race`, `go vet` clean, `golangci-lint` clean.
 
 ```
 $ make ci-check
@@ -26,6 +26,7 @@ golangci-lint run ./...                      → 0 issues
 | P8: Dev tooling & CI | 3 | `Makefile`, `.golangci.yml`, `.github/workflows/ci.yml`, `README.md`, `AGENTS.md` | `make fmt` → `vet` → `test` → `lint` → `build` | ✅ |
 | P9: Proxy server | 5 | `config.go`, `wsadapter.go`, `proxy.go`, `proxy_test.go`, `main.go` | health check, WS echo, connection limit | ✅ |
 | P10: Audit, Hardening & Reconnection | 20 | `resilient_conn.go`, `resilient_conn_test.go`, `Dockerfile`, `docker-compose.yml`, 14 Go files | Valve CAS, busy-spin, data races, Docker, auto-reconnect, buffering | ✅ |
+| P11: Graceful Shutdown & Resilience | 7 | `wsadapter.go`, `proxy.go`, `resilient_conn.go`, `pipeline.go`, `sanctuary.go`, `config.go`, `actions.go` | WS ping/pong, reconnect timeout, graceful shutdown, drop_connection, drain timeout, constants | ✅ |
 
 ## Test Results
 
@@ -59,7 +60,8 @@ main (not yet merged)
     ├── feature/p7-monitoring
     ├── feature/p8-devtooling-ci
     ├── feature/p9-proxy-server
-    └── feature/p10-audit-and-hardening
+    ├── feature/p10-audit-and-hardening
+    └── feature/p11-graceful-shutdown-websocket-proxy (active)
 ```
 
 ## Current State
@@ -67,7 +69,7 @@ main (not yet merged)
 - **Zero external dependencies** for core (stdlib only)
 - **gorilla/websocket v1.5.3** for WebSocket proxy — `cmd/` layer only
 - **pgx v5.10.0** for monitoring, isolated behind `//go:build monitoring` build tag
-- **42 tests** across 6 packages with `-race` clean
+- **44 tests** across 6 packages with `-race` clean
 - **`make ci-check`** runs the full pipeline: fmt → vet → test → lint
 - **Proxy capabilities**: TCP relay, WebSocket `/ws`, health check `/healthz`, configurable backpressure, connection limiting, graceful shutdown, transparent reconnection and buffering on backend outage
 
@@ -194,4 +196,64 @@ postgres
 20 files changed across 7 packages + 5 new files
 New files: Dockerfile, docker-compose.yml, .dockerignore, resilient_conn.go, resilient_conn_test.go
 Commits: 14 (audit fixes) + 4 (Docker) + 2 (Resilient Connection) = 20 total on feature/p10-audit-and-hardening
+```
+
+---
+
+## Phase 11: Graceful Shutdown & WebSocket Resilience
+
+### Scope
+
+Add production-grade keepalive, bounded reconnection, graceful shutdown with drain timeout, and a new backpressure mode (`drop_connection`). Phase 11 addresses gaps where an idle WebSocket connection would never be detected stale, where a permanently unreachable upstream would retry forever, and where server shutdown could leave pipelines hanging.
+
+### Changes
+
+| # | File | Change | Objective |
+|---|------|--------|-----------|
+| 1 | `internal/server/wsadapter.go` | WebSocket ping/pong — `wsAdapter` struct, 30s ping ticker, 60s pong read deadline, `SetPongHandler`, shared `writeMu` | Detect stale connections; close idle WS after 60s of silence |
+| 2 | `internal/server/resilient_conn.go` | Bounded reconnect — `reconnectTimeout` param (default 30s), cumulative retry timing | Prevent infinite reconnect loop against unreachable upstream |
+| 3 | `internal/server/proxy.go` | Graceful shutdown — `activeWSConns sync.Map`, `activeConns` WaitGroup, `SetReadDeadline(time.Now())` on all WS conns during `Stop()`, `cancelReader` context checks | Clean teardown without goroutine leaks |
+| 4 | `internal/server/proxy.go` | Shutdown deadlock fix — `ru.Close()` after ingress stop unblocks egress ingestion loop | Fix egress pipeline stuck on `conn.Read` during shutdown |
+| 5 | `internal/sanctuary/sanctuary.go` | `DropConnection` enum value | New backpressure mode |
+| 6 | `internal/pipeline/pipeline.go` | `DropConnection` handling in `ingestionLoop` — calls `p.cancel()` and returns on full sanctuary | Connection-level backpressure instead of dropping data |
+| 7 | `internal/pipeline/pipeline.go` | `Stop(drainTimeout)` — drain phase transitions valve to DRAINING, polls sanctuary empty with 5ms ticker, hard stop on timeout | Bounded graceful drain of in-flight data before hard shutdown |
+| 8 | `internal/server/config.go` | `ReconnectTimeout`, `ShutdownDrainTimeout` fields with flags/env vars (defaults: 30s) | Configurable timeouts |
+| 9 | `internal/pipeline/pipeline.go` | Added `defaultSanctuaryCapacity`, `defaultReadBufferSize`, `drainPollInterval`, `heldPollInterval` constants; replaced valve state strings with `valve.X.String()` | Eliminates 6 magic numbers/strings; self-documenting intent |
+| 10 | `internal/interceptor/actions.go` | Replaced `"OPEN"`/`"HELD"`/`"DRAINING"` switch cases with `valve.X.String()` | Eliminates 3 duplicated string literals |
+| 11 | `internal/server/proxy.go` | Added `wsEndpoint`, `healthEndpoint`, `networkTCP`, `defaultSancCap`, `defaultWSBufSize` constants; replaced backpressure switch strings with `sanctuary.X.String()` | Eliminates 7 magic values across route paths, network type, backpressure modes, buffer sizes |
+| 12 | `internal/server/resilient_conn.go` | Added `reconnectRetryDelay` constant; replaced `"tcp"` with shared `networkTCP` | Single source of truth for retry interval and network type |
+
+### Test Results
+
+```
+$ make test
+go test -race -count=1 -timeout 60s ./...
+ok  	github.com/ysBayram/kervan-proxy/internal/interceptor	1.363s
+ok  	github.com/ysBayram/kervan-proxy/internal/monitoring	1.765s
+ok  	github.com/ysBayram/kervan-proxy/internal/pipeline	5.430s
+ok  	github.com/ysBayram/kervan-proxy/internal/sanctuary	1.964s
+ok  	github.com/ysBayram/kervan-proxy/internal/server	4.792s
+ok  	github.com/ysBayram/kervan-proxy/internal/valve	2.745s
+```
+
+All test suites pass with `-race` detector enabled — zero data races.
+
+### Lint
+
+```
+$ make lint
+0 issues.
+```
+
+### Git Status (Phase 11)
+
+```
+7 commits on feature/p11-graceful-shutdown-websocket-proxy:
+  0644442 feat(p11): add WebSocket ping/pong keepalive mechanism
+  7fa469c feat(p11): add bounded reconnect timeout to ResilientUpstream
+  4a04a20 feat(p11): implement graceful server shutdown with active connection tracking
+  121f531 feat(p11): add drop_connection backpressure mode
+  1583eec feat(p11): add shutdown drain timeout to pipeline Stop
+  2eca5e5 feat(p11): update tests for phase 11 API changes
+  60dca9a feat(p11): extract hardcoded values into named constants
 ```

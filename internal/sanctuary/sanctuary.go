@@ -23,6 +23,7 @@ type BackpressureAction int
 const (
 	DropOldest BackpressureAction = iota
 	RejectNew
+	DropConnection
 )
 
 func (a BackpressureAction) String() string {
@@ -31,6 +32,8 @@ func (a BackpressureAction) String() string {
 		return "drop_oldest"
 	case RejectNew:
 		return "reject_new"
+	case DropConnection:
+		return "drop_connection"
 	default:
 		return "unknown"
 	}

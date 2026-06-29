@@ -19,6 +19,7 @@ func TestResilientUpstreamFlow(t *testing.T) {
 	cfg.UpstreamAddr = backendAddr
 	cfg.UpstreamTimeout = 500 * time.Millisecond
 
+	cfg.ReconnectTimeout = 3 * time.Second
 	srv := NewProxyServer(cfg)
 	if err := srv.Start(); err != nil {
 		t.Fatal(err)
@@ -46,7 +47,7 @@ func TestResilientUpstreamFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	
+
 	backendReceived := make(chan string, 1)
 	go func() {
 		conn, err := backendListener.Accept()

@@ -139,9 +139,11 @@ All configurations can be loaded via environment variables or CLI flags:
 | `--listen` | `LISTEN` | `:8080` | Host and port to listen on |
 | `--upstream` | `UPSTREAM` | `127.0.0.1:9000` | Upstream backend address |
 | `--capacity` | `CAPACITY` | `10000` | Sanctuary buffer capacity per pipeline |
-| `--backpressure` | `BACKPRESSURE` | `drop_oldest` | Backpressure mode (`drop_oldest` or `reject_new`) |
+| `--backpressure` | `BACKPRESSURE` | `drop_oldest` | Backpressure mode (`drop_oldest`, `reject_new`, or `drop_connection`) |
 | `--max-connections` | `MAX_CONNECTIONS` | `10000` | Max concurrent proxy connections |
 | `--upstream-timeout` | `UPSTREAM_TIMEOUT` | `10s` | Upstream target connection dial timeout |
+| `--reconnect-timeout` | `RECONNECT_TIMEOUT` | `30s` | Upstream reconnect timeout (`0` = unlimited) |
+| `--shutdown-drain-timeout` | `SHUTDOWN_DRAIN_TIMEOUT` | `30s` | Pipeline drain timeout on shutdown |
 | `--read-timeout` | `READ_TIMEOUT` | `30s` | HTTP connection read timeout |
 | `--write-timeout` | `WRITE_TIMEOUT` | `30s` | HTTP connection write timeout |
 | `--database-url` | `DATABASE_URL` | *See Description* | Postgres connection URL. Defaults to: `postgres://localhost:5432/kervan?sslmode=disable` |

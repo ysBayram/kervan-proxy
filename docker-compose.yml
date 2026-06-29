@@ -13,6 +13,8 @@ services:
       - MAX_CONNECTIONS=10000
       - BACKPRESSURE=drop_oldest
       - UPSTREAM_TIMEOUT=10s
+      - RECONNECT_TIMEOUT=30s
+      - SHUTDOWN_DRAIN_TIMEOUT=30s
       - READ_TIMEOUT=30s
       - WRITE_TIMEOUT=30s
     restart: unless-stopped
@@ -34,6 +36,8 @@ services:
       - MAX_CONNECTIONS=10000
       - BACKPRESSURE=drop_oldest
       - UPSTREAM_TIMEOUT=10s
+      - RECONNECT_TIMEOUT=30s
+      - SHUTDOWN_DRAIN_TIMEOUT=30s
       - READ_TIMEOUT=30s
       - WRITE_TIMEOUT=30s
       - DATABASE_URL=postgres://kervan:kervan@postgres:5432/kervan?sslmode=disable

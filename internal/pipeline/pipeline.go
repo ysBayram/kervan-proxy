@@ -13,6 +13,13 @@ import (
 	"github.com/ysBayram/kervan-proxy/internal/valve"
 )
 
+const (
+	defaultSanctuaryCapacity = 10000
+	defaultReadBufferSize    = 4096
+	drainPollInterval        = 5 * time.Millisecond
+	heldPollInterval         = 10 * time.Millisecond
+)
+
 type Config struct {
 	SanctuaryCapacity  int
 	ReadBufferSize     int
@@ -56,8 +63,8 @@ func WithSanctuaryCapacity(capacity int) Option {
 
 func NewPipeline(source io.Reader, target io.Writer, opts ...Option) *Pipeline {
 	cfg := Config{
-		SanctuaryCapacity: 10000,
-		ReadBufferSize:    4096,
+		SanctuaryCapacity: defaultSanctuaryCapacity,
+		ReadBufferSize:    defaultReadBufferSize,
 	}
 	p := &Pipeline{
 		source:     source,
@@ -94,7 +101,36 @@ func (p *Pipeline) Start() error {
 	return nil
 }
 
-func (p *Pipeline) Stop() error {
+func (p *Pipeline) Stop(drainTimeout time.Duration) error {
+	p.mu.Lock()
+	hasCancel := p.cancel != nil
+	p.mu.Unlock()
+	if !hasCancel {
+		return nil
+	}
+
+	if drainTimeout > 0 {
+		st := p.valve.State()
+		if st == valve.OPEN || st == valve.DRAINING {
+			p.valve.TransitionTo(valve.DRAINING)
+		}
+
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), drainTimeout)
+		defer drainCancel()
+
+		ticker := time.NewTicker(drainPollInterval)
+		defer ticker.Stop()
+
+		for p.sanctuary.Len() > 0 {
+			select {
+			case <-drainCtx.Done():
+				goto hardStop
+			case <-ticker.C:
+			}
+		}
+	}
+
+hardStop:
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.cancel != nil {
@@ -146,21 +182,31 @@ func (p *Pipeline) ingestionLoop() {
 				p.sanctuary.Push(buf[:n])
 				p.valve.TransitionTo(valve.HELD)
 				p.emitEvent("valve_transition", map[string]any{
-					"from": "OPEN",
-					"to":   "HELD",
+					"from": valve.OPEN.String(),
+					"to":   valve.HELD.String(),
 				})
 			}
 		case valve.HELD, valve.DRAINING:
 			if err := p.sanctuary.Push(buf[:n]); err != nil {
 				action := p.cfg.BackpressureAction
-				if action == sanctuary.RejectNew {
+				switch action {
+				case sanctuary.RejectNew:
 					p.emitEvent("backpressure", map[string]any{
 						"action": "reject_new",
 						"len":    p.sanctuary.Len(),
 						"cap":    p.sanctuary.Cap(),
 						"reason": err.Error(),
 					})
-				} else {
+				case sanctuary.DropConnection:
+					p.emitEvent("backpressure", map[string]any{
+						"action": "drop_connection",
+						"len":    p.sanctuary.Len(),
+						"cap":    p.sanctuary.Cap(),
+						"reason": err.Error(),
+					})
+					p.cancel()
+					return
+				default:
 					p.emitEvent("backpressure", map[string]any{
 						"action": "drop_oldest",
 						"len":    p.sanctuary.Len(),
@@ -191,7 +237,7 @@ func (p *Pipeline) executionLoop() {
 		case valve.HELD:
 			p.intercepts.Evaluate()
 			select {
-			case <-time.After(10 * time.Millisecond):
+			case <-time.After(heldPollInterval):
 			case <-p.ctx.Done():
 				return
 			}
@@ -211,8 +257,8 @@ func (p *Pipeline) executionLoop() {
 						return
 					}
 					p.emitEvent("valve_transition", map[string]any{
-						"from": "DRAINING",
-						"to":   "OPEN",
+						"from": valve.DRAINING.String(),
+						"to":   valve.OPEN.String(),
 					})
 					break
 				}
@@ -222,8 +268,8 @@ func (p *Pipeline) executionLoop() {
 						return
 					}
 					p.emitEvent("valve_transition", map[string]any{
-						"from": "DRAINING",
-						"to":   "HELD",
+						"from": valve.DRAINING.String(),
+						"to":   valve.HELD.String(),
 					})
 					break
 				}

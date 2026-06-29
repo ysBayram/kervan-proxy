@@ -8,28 +8,32 @@ import (
 )
 
 type Config struct {
-	ListenAddr       string
-	UpstreamAddr     string
-	SanctuaryCap     int
-	BackpressureMode string
-	MaxConnections   int
-	UpstreamTimeout  time.Duration
-	ReadTimeout      time.Duration
-	WriteTimeout     time.Duration
-	DatabaseURL      string
+	ListenAddr           string
+	UpstreamAddr         string
+	SanctuaryCap         int
+	BackpressureMode     string
+	MaxConnections       int
+	UpstreamTimeout      time.Duration
+	ReadTimeout          time.Duration
+	WriteTimeout         time.Duration
+	ReconnectTimeout     time.Duration
+	ShutdownDrainTimeout time.Duration
+	DatabaseURL          string
 }
 
 func DefaultConfig() Config {
 	return Config{
-		ListenAddr:       ":8080",
-		UpstreamAddr:     "127.0.0.1:9000",
-		SanctuaryCap:     10000,
-		BackpressureMode: "drop_oldest",
-		MaxConnections:   10000,
-		UpstreamTimeout:  10 * time.Second,
-		ReadTimeout:      30 * time.Second,
-		WriteTimeout:     30 * time.Second,
-		DatabaseURL:      "postgres://localhost:5432/kervan?sslmode=disable",
+		ListenAddr:           ":8080",
+		UpstreamAddr:         "127.0.0.1:9000",
+		SanctuaryCap:         10000,
+		BackpressureMode:     "drop_oldest",
+		MaxConnections:       10000,
+		UpstreamTimeout:      10 * time.Second,
+		ReadTimeout:          30 * time.Second,
+		WriteTimeout:         30 * time.Second,
+		ReconnectTimeout:     30 * time.Second,
+		ShutdownDrainTimeout: 30 * time.Second,
+		DatabaseURL:          "postgres://localhost:5432/kervan?sslmode=disable",
 	}
 }
 
@@ -42,6 +46,8 @@ func ConfigFromFlags() Config {
 	flag.StringVar(&cfg.BackpressureMode, "backpressure", envStr("BACKPRESSURE", cfg.BackpressureMode), "Backpressure mode (drop_oldest|reject_new)")
 	flag.IntVar(&cfg.MaxConnections, "max-connections", envInt("MAX_CONNECTIONS", cfg.MaxConnections), "Maximum concurrent connections")
 	flag.DurationVar(&cfg.UpstreamTimeout, "upstream-timeout", envDur("UPSTREAM_TIMEOUT", cfg.UpstreamTimeout), "Upstream dial timeout")
+	flag.DurationVar(&cfg.ReconnectTimeout, "reconnect-timeout", envDur("RECONNECT_TIMEOUT", cfg.ReconnectTimeout), "Upstream reconnect timeout (0 = unlimited)")
+	flag.DurationVar(&cfg.ShutdownDrainTimeout, "shutdown-drain-timeout", envDur("SHUTDOWN_DRAIN_TIMEOUT", cfg.ShutdownDrainTimeout), "Pipeline drain timeout on shutdown")
 	flag.DurationVar(&cfg.ReadTimeout, "read-timeout", envDur("READ_TIMEOUT", cfg.ReadTimeout), "Read timeout")
 	flag.DurationVar(&cfg.WriteTimeout, "write-timeout", envDur("WRITE_TIMEOUT", cfg.WriteTimeout), "Write timeout")
 	flag.StringVar(&cfg.DatabaseURL, "database-url", envStr("DATABASE_URL", cfg.DatabaseURL), "Database URL for monitoring")

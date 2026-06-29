@@ -17,11 +17,11 @@ func TransitionValveTo(vc ValveController, target string) func() {
 	return func() {
 		var state valve.ValveState
 		switch target {
-		case "OPEN":
+		case valve.OPEN.String():
 			state = valve.OPEN
-		case "HELD":
+		case valve.HELD.String():
 			state = valve.HELD
-		case "DRAINING":
+		case valve.DRAINING.String():
 			state = valve.DRAINING
 		default:
 			return

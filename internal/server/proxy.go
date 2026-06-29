@@ -20,6 +20,14 @@ import (
 	"github.com/ysBayram/kervan-proxy/internal/valve"
 )
 
+const (
+	wsEndpoint       = "/ws"
+	healthEndpoint   = "/healthz"
+	networkTCP       = "tcp"
+	defaultSancCap   = 10000
+	defaultWSBufSize = 4096
+)
+
 type ProxyServer struct {
 	cfg    Config
 	ctx    context.Context
@@ -28,8 +36,9 @@ type ProxyServer struct {
 	httpServer  *http.Server
 	tcpListener net.Listener
 
-	activeConns sync.WaitGroup
-	connCounter atomic.Int64
+	activeConns   sync.WaitGroup
+	activeWSConns sync.Map
+	connCounter   atomic.Int64
 
 	startedAt time.Time
 	upgrader  websocket.Upgrader
@@ -39,8 +48,8 @@ func NewProxyServer(cfg Config) *ProxyServer {
 	return &ProxyServer{
 		cfg: cfg,
 		upgrader: websocket.Upgrader{
-			ReadBufferSize:  4096,
-			WriteBufferSize: 4096,
+			ReadBufferSize:  defaultWSBufSize,
+			WriteBufferSize: defaultWSBufSize,
 			CheckOrigin:     func(r *http.Request) bool { return true },
 		},
 	}
@@ -51,10 +60,10 @@ func (s *ProxyServer) Start() error {
 	s.startedAt = time.Now()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", s.handleWS)
-	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc(wsEndpoint, s.handleWS)
+	mux.HandleFunc(healthEndpoint, s.handleHealth)
 
-	httpListener, err := net.Listen("tcp", s.cfg.ListenAddr)
+	httpListener, err := net.Listen(networkTCP, s.cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("server: listen %s: %w", s.cfg.ListenAddr, err)
 	}
@@ -88,6 +97,12 @@ func (s *ProxyServer) Stop() {
 		s.tcpListener.Close()
 	}
 
+	s.activeWSConns.Range(func(key, value any) bool {
+		wsConn := value.(*websocket.Conn)
+		wsConn.SetReadDeadline(time.Now())
+		return true
+	})
+
 	s.activeConns.Wait()
 	log.Println("server: all connections closed")
 }
@@ -104,21 +119,38 @@ func (s *ProxyServer) handleWS(w http.ResponseWriter, r *http.Request) {
 		log.Printf("server: ws upgrade error: %v", err)
 		return
 	}
-	defer wsConn.Close()
 
-	ru := NewResilientUpstream(s.ctx, s.cfg.UpstreamAddr, s.cfg.UpstreamTimeout)
+	connID := s.connCounter.Load()
+	s.activeWSConns.Store(connID, wsConn)
+	s.activeConns.Add(1)
+
+	clientReader, clientWriter, closeAdapter := newWSAdapter(wsConn)
+
+	defer func() {
+		s.activeWSConns.Delete(connID)
+		closeAdapter()
+		s.activeConns.Done()
+	}()
+
+	ru := NewResilientUpstream(s.ctx, s.cfg.UpstreamAddr, s.cfg.UpstreamTimeout, s.cfg.ReconnectTimeout)
 	defer ru.Close()
 
-	clientReader, clientWriter := newWSAdapter(wsConn)
 	s.runPipelines(clientReader, clientWriter, ru, ru)
 }
 
 type cancelReader struct {
 	r      io.Reader
 	cancel context.CancelFunc
+	ctx    context.Context
 }
 
 func (cr *cancelReader) Read(p []byte) (int, error) {
+	select {
+	case <-cr.ctx.Done():
+		return 0, cr.ctx.Err()
+	default:
+	}
+
 	n, err := cr.r.Read(p)
 	if err != nil {
 		cr.cancel()
@@ -133,12 +165,12 @@ func (s *ProxyServer) runPipelines(
 	ctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
 
-	wrappedClientReader := &cancelReader{r: clientReader, cancel: cancel}
-	wrappedUpReader := &cancelReader{r: upReader, cancel: cancel}
+	wrappedClientReader := &cancelReader{r: clientReader, cancel: cancel, ctx: ctx}
+	wrappedUpReader := &cancelReader{r: upReader, cancel: cancel, ctx: ctx}
 
 	sancCap := s.cfg.SanctuaryCap
 	if sancCap <= 0 {
-		sancCap = 10000
+		sancCap = defaultSancCap
 	}
 
 	ingress := pipeline.NewPipeline(wrappedClientReader, upWriter,
@@ -171,21 +203,28 @@ func (s *ProxyServer) runPipelines(
 		return
 	}
 	if err := egress.Start(); err != nil {
-		ingress.Stop()
+		ingress.Stop(0)
 		log.Printf("server: egress start error: %v", err)
 		return
 	}
 
 	<-ctx.Done()
 
-	ingress.Stop()
-	egress.Stop()
+	ingress.Stop(s.cfg.ShutdownDrainTimeout)
+
+	if ru, ok := upWriter.(*ResilientUpstream); ok {
+		ru.Close()
+	}
+
+	egress.Stop(0)
 }
 
 func (s *ProxyServer) configureBackpressure(p *pipeline.Pipeline) {
 	switch s.cfg.BackpressureMode {
-	case "reject_new":
+	case sanctuary.RejectNew.String():
 		p.SetBackpressure(sanctuary.RejectNew)
+	case sanctuary.DropConnection.String():
+		p.SetBackpressure(sanctuary.DropConnection)
 	default:
 		p.SetBackpressure(sanctuary.DropOldest)
 	}
