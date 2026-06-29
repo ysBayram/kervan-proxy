@@ -39,6 +39,7 @@ type ProxyServer struct {
 	activeConns   sync.WaitGroup
 	activeWSConns sync.Map
 	connCounter   atomic.Int64
+	connIDSeq     atomic.Int64
 
 	startedAt time.Time
 	upgrader  websocket.Upgrader
@@ -120,9 +121,9 @@ func (s *ProxyServer) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	connID := s.connCounter.Load()
-	s.activeWSConns.Store(connID, wsConn)
+	connID := s.connIDSeq.Add(1)
 	s.activeConns.Add(1)
+	s.activeWSConns.Store(connID, wsConn)
 
 	clientReader, clientWriter, closeAdapter := newWSAdapter(wsConn)
 

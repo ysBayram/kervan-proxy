@@ -59,6 +59,7 @@ func (w *wsWriter) Write(p []byte) (int, error) {
 	w.adapter.writeMu.Lock()
 	defer w.adapter.writeMu.Unlock()
 
+	w.adapter.conn.SetWriteDeadline(time.Now().Add(writeWait))
 	if err := w.adapter.conn.WriteMessage(websocket.BinaryMessage, p); err != nil {
 		return 0, err
 	}

@@ -24,7 +24,7 @@ func (s ValveState) String() string {
 }
 
 var validTransitions = map[ValveState]map[ValveState]bool{
-	OPEN:     {HELD: true},
+	OPEN:     {HELD: true, DRAINING: true},
 	HELD:     {DRAINING: true},
 	DRAINING: {OPEN: true, HELD: true},
 }

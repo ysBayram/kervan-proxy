@@ -11,6 +11,7 @@ type EventBus struct {
 	dropped atomic.Int64
 	queued  atomic.Int64
 	cap     int
+	closed  atomic.Bool
 
 	closeOnce sync.Once
 }
@@ -23,6 +24,10 @@ func NewEventBus(capacity int) *EventBus {
 }
 
 func (eb *EventBus) Publish(event Event) {
+	if eb.closed.Load() {
+		eb.dropped.Add(1)
+		return
+	}
 	select {
 	case eb.ch <- event:
 		eb.queued.Add(1)
@@ -37,6 +42,7 @@ func (eb *EventBus) Subscribe() <-chan Event {
 
 func (eb *EventBus) Close() {
 	eb.closeOnce.Do(func() {
+		eb.closed.Store(true)
 		close(eb.ch)
 	})
 }

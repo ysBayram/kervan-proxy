@@ -30,7 +30,7 @@ func TestValveTransitionMatrix(t *testing.T) {
 	}{
 		{OPEN, OPEN, false},
 		{OPEN, HELD, true},
-		{OPEN, DRAINING, false},
+		{OPEN, DRAINING, true},
 		{HELD, OPEN, false},
 		{HELD, HELD, false},
 		{HELD, DRAINING, true},

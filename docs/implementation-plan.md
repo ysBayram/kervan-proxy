@@ -618,4 +618,42 @@ Phase 10 introduced the `ResilientUpstream` with infinite reconnect loop, but le
 | Phase | Est. Duration | Key Deliverable |
 |-------|---------------|-----------------|
 | P11: WebSocket Resilience | 3 days | Ping/pong, bounded reconnect, graceful shutdown, drain timeout, drop_connection |
-| **Total** | **~26 days** | |
+| P12: Code Review Audit Fixes | 3 days | Nil pointer fix, ID collision fix, drain bug fix, busy-spin fix, write deadline, reconnect guard, formatting |
+| **Total** | **~29 days** | |
+
+---
+
+## Phase 12: Code Review Audit Fixes
+
+**Goal:** Address the most impactful findings from the code review report — nil pointer panics, ID collision deadlocks, invalid FSM transitions, CPU busy-spin, missing write deadlines, goroutine leaks, and maintainability gaps.
+
+### Motivation
+
+The comprehensive code review (v2) identified 30+ findings across all packages. This phase tackles the highest-severity items: (1) a nil pointer panic in `recorder_pgx.go` that makes the monitoring build tag crash on startup; (2) a dual-use `connCounter` causing ID collisions and shutdown deadlocks; (3) a silently skipped drain phase in `Pipeline.Stop` due to an invalid FSM transition; (4) a 100% CPU busy-spin in the OPEN execution loop; (5) missing write deadlines that can block WebSocket writes indefinitely; and (6) multiple goroutine leak and data race windows.
+
+### Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| OPEN→DRAINING transition | Add to FSM matrix | Cleanest fix for Stop drain skip; semantically valid for shutdown |
+| connID source | Separate monotonic `atomic.Int64` (never decremented) | Eliminates collision without UUID overhead |
+| OPEN state throttle | Add `openPollInterval = 100 * time.Millisecond` | Slow enough for negligible CPU (≈10 polls/s), fast enough for responsiveness |
+| reconnectLoop guard | Atomic bool `reconnecting` | Prevents goroutine pileup without extra channels |
+| errcheck linter | Re-enable with path-based exclusions | Catches unchecked errors while allowing intentional discards |
+| fmt-check | New `fmt-check` target in Makefile | Fails CI on unformatted files; `ci-check` runs it |
+
+### Subtasks
+
+| # | Subtask | Component | Acceptance Criteria |
+|---|---------|-----------|---------------------|
+| 12.1 | **Fix nil pointer in recorder_pgx.Start** | `internal/monitoring/recorder_pgx.go` | Move `r.pool = pool` assignment before `runMigrations` call. Remove duplicate DB URL default (config layer already provides it). |
+| 12.2 | **Fix connCounter ID collision** | `internal/server/proxy.go` | Add separate `connIDSeq` monotonic `atomic.Int64` for unique connection IDs. `connCounter` remains for limit enforcement only. |
+| 12.3 | **Fix invalid OPEN→DRAINING transition in Stop** | `internal/valve/state.go`, `internal/pipeline/pipeline.go` | Add `OPEN → DRAINING` to FSM transition matrix. Change `Stop()` to read the state once and attempt the single transition. Remove redundant DRAINING→DRAINING no-op guard. |
+| 12.4 | **Fix Close() not setting ru.connected=false** | `internal/server/resilient_conn.go` | Add `ru.connected = false` in `Close()` before `Broadcast()` to prevent nil connection reads. |
+| 12.5 | **Add polling interval to OPEN state** | `internal/pipeline/pipeline.go` | Add `openPollInterval = 100ms` constant; use `select { case <-time.After(openPollInterval): case <-p.ctx.Done(): }` in OPEN state to eliminate busy-spin. |
+| 12.6 | **Add write deadline to wsWriter.Write** | `internal/server/wsadapter.go` | Call `conn.SetWriteDeadline(time.Now().Add(writeWait))` before `WriteMessage` in normal writes (ping loop already does this). |
+| 12.7 | **Fix activeConns.Add(1) ordering window** | `internal/server/proxy.go` | Move `s.activeConns.Add(1)` before `s.activeWSConns.Store`, ideally right after WS upgrade succeeds. |
+| 12.8 | **Prevent multiple concurrent reconnectLoop goroutines** | `internal/server/resilient_conn.go` | Add `reconnecting atomic.Bool` field. Guard `go ru.reconnectLoop()` calls with CAS. |
+| 12.9 | **Make blockSize const and fix DropOldest allocation** | `internal/sanctuary/sanctuary.go` | Change `var blockSize = 4096` to `const blockSize = 4096`. Remove allocation in `DropOldest` since all callers discard the return value. |
+| 12.10 | **go.mod tidy, golangci-lint errcheck, Makefile fmt-check** | `go.mod`, `.golangci.yml`, `Makefile` | Run `go mod tidy` to fix `gorilla/websocket` indirect annotation. Re-enable `errcheck` with `exclude-rules` for test files and `Encode`. Add `fmt-check` target to `ci-check`. |
+| 12.11 | **EventBus publish-after-close guard** | `internal/monitoring/eventbus.go` | Add `closed atomic.Bool` field; set in `Close()`; check in `Publish()` to prevent panic. |

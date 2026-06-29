@@ -6,6 +6,8 @@ import (
 	"sync"
 )
 
+const blockSize = 4096
+
 var (
 	ErrBufferFull = errors.New("sanctuary buffer full")
 
@@ -15,7 +17,6 @@ var (
 			return &buf
 		},
 	}
-	blockSize = 4096
 )
 
 type BackpressureAction int
@@ -184,13 +185,11 @@ func (s *Sanctuary) Reset() {
 	s.buf.reset()
 }
 
-func (s *Sanctuary) DropOldest() ([]byte, bool) {
-	block, dataLen, ok := s.buf.pop()
+func (s *Sanctuary) DropOldest() bool {
+	block, _, ok := s.buf.pop()
 	if !ok {
-		return nil, false
+		return false
 	}
-	out := make([]byte, dataLen)
-	copy(out, block[:dataLen])
 	putBlock(block)
-	return out, true
+	return true
 }

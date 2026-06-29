@@ -18,6 +18,7 @@ const (
 	defaultReadBufferSize    = 4096
 	drainPollInterval        = 5 * time.Millisecond
 	heldPollInterval         = 10 * time.Millisecond
+	openPollInterval         = 100 * time.Millisecond
 )
 
 type Config struct {
@@ -110,8 +111,7 @@ func (p *Pipeline) Stop(drainTimeout time.Duration) error {
 	}
 
 	if drainTimeout > 0 {
-		st := p.valve.State()
-		if st == valve.OPEN || st == valve.DRAINING {
+		if st := p.valve.State(); st.CanTransitionTo(valve.DRAINING) {
 			p.valve.TransitionTo(valve.DRAINING)
 		}
 
@@ -280,6 +280,11 @@ func (p *Pipeline) executionLoop() {
 				return
 			}
 			p.intercepts.Evaluate()
+			select {
+			case <-time.After(openPollInterval):
+			case <-p.ctx.Done():
+				return
+			}
 		}
 	}
 }
