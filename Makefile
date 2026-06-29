@@ -36,6 +36,12 @@ vet:
 fmt:
 	go fmt ./...
 
+fmt-check:
+	@if go fmt ./... 2>&1 | grep -q .; then \
+		echo "Unformatted files found; run make fmt"; \
+		exit 1; \
+	fi
+
 bench:
 	go test -bench=. -benchmem -timeout 120s ./...
 
