@@ -110,8 +110,7 @@ func (p *Pipeline) Stop(drainTimeout time.Duration) error {
 	}
 
 	if drainTimeout > 0 {
-		st := p.valve.State()
-		if st == valve.OPEN || st == valve.DRAINING {
+		if st := p.valve.State(); st.CanTransitionTo(valve.DRAINING) {
 			p.valve.TransitionTo(valve.DRAINING)
 		}
 
