@@ -153,6 +153,7 @@ func (ru *ResilientUpstream) Close() error {
 	ru.cancel()
 	ru.mu.Lock()
 	defer ru.mu.Unlock()
+	ru.connected = false
 	ru.cond.Broadcast()
 	if ru.conn != nil {
 		err := ru.conn.Close()
