@@ -94,7 +94,36 @@ func (p *Pipeline) Start() error {
 	return nil
 }
 
-func (p *Pipeline) Stop() error {
+func (p *Pipeline) Stop(drainTimeout time.Duration) error {
+	p.mu.Lock()
+	hasCancel := p.cancel != nil
+	p.mu.Unlock()
+	if !hasCancel {
+		return nil
+	}
+
+	if drainTimeout > 0 {
+		st := p.valve.State()
+		if st == valve.OPEN || st == valve.DRAINING {
+			p.valve.TransitionTo(valve.DRAINING)
+		}
+
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), drainTimeout)
+		defer drainCancel()
+
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+
+		for p.sanctuary.Len() > 0 {
+			select {
+			case <-drainCtx.Done():
+				goto hardStop
+			case <-ticker.C:
+			}
+		}
+	}
+
+hardStop:
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.cancel != nil {
