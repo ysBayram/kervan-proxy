@@ -27,7 +27,7 @@ func TestPipelineOpenDirectFlow(t *testing.T) {
 	srcW.Close()
 	time.Sleep(100 * time.Millisecond)
 
-	if err := p.Stop(); err != nil {
+	if err := p.Stop(0); err != nil {
 		t.Fatal(err)
 	}
 	if dst.String() != "hello, world" {
@@ -41,7 +41,7 @@ func TestPipelineHeldBuffersData(t *testing.T) {
 
 	p := NewPipeline(srcR, &dst)
 	p.Start()
-	defer p.Stop()
+	defer p.Stop(0)
 
 	if err := p.Valve().TransitionTo(valve.HELD); err != nil {
 		t.Fatal(err)
@@ -68,7 +68,7 @@ func TestPipelineFullCycle(t *testing.T) {
 
 	p := NewPipeline(srcR, &dst)
 	p.Start()
-	defer p.Stop()
+	defer p.Stop(0)
 
 	if err := p.Valve().TransitionTo(valve.HELD); err != nil {
 		t.Fatal(err)
@@ -111,7 +111,7 @@ func TestPipelineCascadingFailure(t *testing.T) {
 
 	p := NewPipeline(srcR, failTarget)
 	p.Start()
-	defer p.Stop()
+	defer p.Stop(0)
 
 	if err := p.Valve().TransitionTo(valve.HELD); err != nil {
 		t.Fatal(err)
@@ -151,7 +151,7 @@ func TestPipelineStartStopIdempotent(t *testing.T) {
 	}
 	srcW.Close()
 	time.Sleep(50 * time.Millisecond)
-	if err := p.Stop(); err != nil {
+	if err := p.Stop(0); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -172,7 +172,7 @@ func TestPipelineInterceptorTriggers(t *testing.T) {
 		},
 	})
 	p.Start()
-	defer p.Stop()
+	defer p.Stop(0)
 
 	srcW.Write([]byte("ping"))
 	srcW.Close()

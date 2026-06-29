@@ -17,7 +17,7 @@ func TestTargetPoisoningPreservesData(t *testing.T) {
 
 	p := NewPipeline(srcR, failTarget)
 	p.Start()
-	defer p.Stop()
+	defer p.Stop(0)
 
 	srcW.Write([]byte("preserve-me"))
 	time.Sleep(100 * time.Millisecond)
@@ -41,7 +41,7 @@ func TestBackpressureDropOldestOnOverflow(t *testing.T) {
 		pl.sanctuary = sanctuary.NewSanctuary(2)
 	})
 	p.Start()
-	defer p.Stop()
+	defer p.Stop(0)
 
 	p.Valve().TransitionTo(valve.HELD)
 
@@ -78,7 +78,7 @@ func TestBackpressureRejectNewOnOverflow(t *testing.T) {
 		pl.sanctuary = sanctuary.NewSanctuary(2)
 	})
 	p.Start()
-	defer p.Stop()
+	defer p.Stop(0)
 
 	p.Valve().TransitionTo(valve.HELD)
 
@@ -111,7 +111,7 @@ func TestCascadingFailureDuringDrain(t *testing.T) {
 
 	p := NewPipeline(srcR, failTarget)
 	p.Start()
-	defer p.Stop()
+	defer p.Stop(0)
 
 	p.Valve().TransitionTo(valve.HELD)
 
@@ -146,7 +146,7 @@ func TestZombieSourceCleanup(t *testing.T) {
 
 	p := NewPipeline(srcR, &dst)
 	p.Start()
-	defer p.Stop()
+	defer p.Stop(0)
 
 	p.Valve().TransitionTo(valve.HELD)
 
@@ -188,7 +188,7 @@ func TestGracefulShutdownDuringDrain(t *testing.T) {
 	p.Valve().TransitionTo(valve.DRAINING)
 	time.Sleep(50 * time.Millisecond)
 
-	if err := p.Stop(); err != nil {
+	if err := p.Stop(0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -212,7 +212,7 @@ func TestConcurrentSourceAndTargetWrites(t *testing.T) {
 		return len(p), nil
 	}))
 	p.Start()
-	defer p.Stop()
+	defer p.Stop(0)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
