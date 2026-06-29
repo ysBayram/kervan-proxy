@@ -611,6 +611,7 @@ Phase 10 introduced the `ResilientUpstream` with infinite reconnect loop, but le
 | 11.5 | **Shutdown Drain Timeout** | `internal/pipeline/pipeline.go`, `internal/server/proxy.go`, `internal/server/config.go` | `Pipeline.Stop(timeout)` attempts drain for up to `ShutdownDrainTimeout` (default 30s) before hard cancel. Execution loop respects drain context during DRAINING state. |
 | 11.6 | **Integration Tests** | `internal/server/proxy_test.go`, `internal/pipeline/edge_test.go` | Tests for ping/pong timeout, reconnect timeout expiry, graceful shutdown with active connections, drop_connection backpressure mode, drain timeout cancellation. All pass with `-race`. |
 | 11.7 | **Config & Flag Updates** | `internal/server/config.go` | New flags: `--reconnect-timeout`, `--shutdown-drain-timeout`. Backpressure flag accepts `drop_connection`. |
+| 11.8 | **Extract Hardcoded Values into Constants** | `internal/pipeline/pipeline.go`, `internal/interceptor/actions.go`, `internal/server/proxy.go`, `internal/server/resilient_conn.go` | Replace inline magic values (numeric literals, string constants, durations) with named package-level constants. Replace duplicated valve state strings with `valve.X.String()` and backpressure strings with `sanctuary.X.String()`. No behavioural change. |
 
 ### Summary Timeline Update
 

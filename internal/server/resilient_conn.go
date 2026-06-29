@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+const (
+	reconnectRetryDelay = 1 * time.Second
+)
+
 type ResilientUpstream struct {
 	addr             string
 	dialTimeout      time.Duration
@@ -53,7 +57,7 @@ func (ru *ResilientUpstream) reconnectLoop() {
 		}
 
 		dialer := net.Dialer{Timeout: ru.dialTimeout}
-		conn, err := dialer.DialContext(ru.ctx, "tcp", ru.addr)
+		conn, err := dialer.DialContext(ru.ctx, networkTCP, ru.addr)
 		if err == nil {
 			ru.mu.Lock()
 			ru.conn = conn
@@ -64,7 +68,7 @@ func (ru *ResilientUpstream) reconnectLoop() {
 			return
 		}
 
-		log.Printf("resilient-upstream: connection to %s failed: %v. Retrying in 1s...", ru.addr, err)
+		log.Printf("resilient-upstream: connection to %s failed: %v. Retrying in %s...", ru.addr, err, reconnectRetryDelay)
 
 		ru.mu.Lock()
 		timeout := ru.reconnectTimeout
@@ -81,7 +85,7 @@ func (ru *ResilientUpstream) reconnectLoop() {
 		select {
 		case <-ru.ctx.Done():
 			return
-		case <-time.After(1 * time.Second):
+		case <-time.After(reconnectRetryDelay):
 		}
 	}
 }

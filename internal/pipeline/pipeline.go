@@ -13,6 +13,13 @@ import (
 	"github.com/ysBayram/kervan-proxy/internal/valve"
 )
 
+const (
+	defaultSanctuaryCapacity = 10000
+	defaultReadBufferSize    = 4096
+	drainPollInterval        = 5 * time.Millisecond
+	heldPollInterval         = 10 * time.Millisecond
+)
+
 type Config struct {
 	SanctuaryCapacity  int
 	ReadBufferSize     int
@@ -56,8 +63,8 @@ func WithSanctuaryCapacity(capacity int) Option {
 
 func NewPipeline(source io.Reader, target io.Writer, opts ...Option) *Pipeline {
 	cfg := Config{
-		SanctuaryCapacity: 10000,
-		ReadBufferSize:    4096,
+		SanctuaryCapacity: defaultSanctuaryCapacity,
+		ReadBufferSize:    defaultReadBufferSize,
 	}
 	p := &Pipeline{
 		source:     source,
@@ -111,7 +118,7 @@ func (p *Pipeline) Stop(drainTimeout time.Duration) error {
 		drainCtx, drainCancel := context.WithTimeout(context.Background(), drainTimeout)
 		defer drainCancel()
 
-		ticker := time.NewTicker(5 * time.Millisecond)
+		ticker := time.NewTicker(drainPollInterval)
 		defer ticker.Stop()
 
 		for p.sanctuary.Len() > 0 {
@@ -175,8 +182,8 @@ func (p *Pipeline) ingestionLoop() {
 				p.sanctuary.Push(buf[:n])
 				p.valve.TransitionTo(valve.HELD)
 				p.emitEvent("valve_transition", map[string]any{
-					"from": "OPEN",
-					"to":   "HELD",
+					"from": valve.OPEN.String(),
+					"to":   valve.HELD.String(),
 				})
 			}
 		case valve.HELD, valve.DRAINING:
@@ -230,7 +237,7 @@ func (p *Pipeline) executionLoop() {
 		case valve.HELD:
 			p.intercepts.Evaluate()
 			select {
-			case <-time.After(10 * time.Millisecond):
+			case <-time.After(heldPollInterval):
 			case <-p.ctx.Done():
 				return
 			}
@@ -250,8 +257,8 @@ func (p *Pipeline) executionLoop() {
 						return
 					}
 					p.emitEvent("valve_transition", map[string]any{
-						"from": "DRAINING",
-						"to":   "OPEN",
+						"from": valve.DRAINING.String(),
+						"to":   valve.OPEN.String(),
 					})
 					break
 				}
@@ -261,8 +268,8 @@ func (p *Pipeline) executionLoop() {
 						return
 					}
 					p.emitEvent("valve_transition", map[string]any{
-						"from": "DRAINING",
-						"to":   "HELD",
+						"from": valve.DRAINING.String(),
+						"to":   valve.HELD.String(),
 					})
 					break
 				}

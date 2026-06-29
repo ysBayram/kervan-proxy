@@ -20,6 +20,14 @@ import (
 	"github.com/ysBayram/kervan-proxy/internal/valve"
 )
 
+const (
+	wsEndpoint       = "/ws"
+	healthEndpoint   = "/healthz"
+	networkTCP       = "tcp"
+	defaultSancCap   = 10000
+	defaultWSBufSize = 4096
+)
+
 type ProxyServer struct {
 	cfg    Config
 	ctx    context.Context
@@ -40,8 +48,8 @@ func NewProxyServer(cfg Config) *ProxyServer {
 	return &ProxyServer{
 		cfg: cfg,
 		upgrader: websocket.Upgrader{
-			ReadBufferSize:  4096,
-			WriteBufferSize: 4096,
+			ReadBufferSize:  defaultWSBufSize,
+			WriteBufferSize: defaultWSBufSize,
 			CheckOrigin:     func(r *http.Request) bool { return true },
 		},
 	}
@@ -52,10 +60,10 @@ func (s *ProxyServer) Start() error {
 	s.startedAt = time.Now()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", s.handleWS)
-	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc(wsEndpoint, s.handleWS)
+	mux.HandleFunc(healthEndpoint, s.handleHealth)
 
-	httpListener, err := net.Listen("tcp", s.cfg.ListenAddr)
+	httpListener, err := net.Listen(networkTCP, s.cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("server: listen %s: %w", s.cfg.ListenAddr, err)
 	}
@@ -162,7 +170,7 @@ func (s *ProxyServer) runPipelines(
 
 	sancCap := s.cfg.SanctuaryCap
 	if sancCap <= 0 {
-		sancCap = 10000
+		sancCap = defaultSancCap
 	}
 
 	ingress := pipeline.NewPipeline(wrappedClientReader, upWriter,
@@ -213,9 +221,9 @@ func (s *ProxyServer) runPipelines(
 
 func (s *ProxyServer) configureBackpressure(p *pipeline.Pipeline) {
 	switch s.cfg.BackpressureMode {
-	case "reject_new":
+	case sanctuary.RejectNew.String():
 		p.SetBackpressure(sanctuary.RejectNew)
-	case "drop_connection":
+	case sanctuary.DropConnection.String():
 		p.SetBackpressure(sanctuary.DropConnection)
 	default:
 		p.SetBackpressure(sanctuary.DropOldest)
