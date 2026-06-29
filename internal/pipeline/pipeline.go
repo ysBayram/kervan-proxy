@@ -153,14 +153,24 @@ func (p *Pipeline) ingestionLoop() {
 		case valve.HELD, valve.DRAINING:
 			if err := p.sanctuary.Push(buf[:n]); err != nil {
 				action := p.cfg.BackpressureAction
-				if action == sanctuary.RejectNew {
+				switch action {
+				case sanctuary.RejectNew:
 					p.emitEvent("backpressure", map[string]any{
 						"action": "reject_new",
 						"len":    p.sanctuary.Len(),
 						"cap":    p.sanctuary.Cap(),
 						"reason": err.Error(),
 					})
-				} else {
+				case sanctuary.DropConnection:
+					p.emitEvent("backpressure", map[string]any{
+						"action": "drop_connection",
+						"len":    p.sanctuary.Len(),
+						"cap":    p.sanctuary.Cap(),
+						"reason": err.Error(),
+					})
+					p.cancel()
+					return
+				default:
 					p.emitEvent("backpressure", map[string]any{
 						"action": "drop_oldest",
 						"len":    p.sanctuary.Len(),
