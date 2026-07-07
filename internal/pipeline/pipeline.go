@@ -62,6 +62,18 @@ func WithSanctuaryCapacity(capacity int) Option {
 	}
 }
 
+// WithReadBufferSize sets the per-read byte buffer used by the ingestion loop.
+// A larger buffer lets a single upstream read/write carry a whole message,
+// which matters for WebSocket forwarding where each Write becomes one frame.
+// Values <= 0 are ignored so the default (defaultReadBufferSize) stays in effect.
+func WithReadBufferSize(size int) Option {
+	return func(p *Pipeline) {
+		if size > 0 {
+			p.cfg.ReadBufferSize = size
+		}
+	}
+}
+
 func NewPipeline(source io.Reader, target io.Writer, opts ...Option) *Pipeline {
 	cfg := Config{
 		SanctuaryCapacity: defaultSanctuaryCapacity,

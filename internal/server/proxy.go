@@ -9,6 +9,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,10 +25,21 @@ import (
 const (
 	wsEndpoint       = "/ws"
 	healthEndpoint   = "/healthz"
+	rootEndpoint     = "/"
 	networkTCP       = "tcp"
 	defaultSancCap   = 10000
 	defaultWSBufSize = 4096
 )
+
+// upstream is the resilient backend connection driven by runPipelines. Both the
+// raw-TCP (*ResilientUpstream) and WebSocket (*ResilientWSUpstream) backends
+// satisfy it, so the pipeline wiring is identical for both modes.
+type upstream interface {
+	io.Reader
+	io.Writer
+	IsConnected() bool
+	Close() error
+}
 
 type ProxyServer struct {
 	cfg    Config
@@ -61,8 +74,14 @@ func (s *ProxyServer) Start() error {
 	s.startedAt = time.Now()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc(wsEndpoint, s.handleWS)
 	mux.HandleFunc(healthEndpoint, s.handleHealth)
+	if s.cfg.UpstreamMode == UpstreamModeWS {
+		// Transparent reverse proxy: accept any path (e.g. /ocpp/{cpID}) and
+		// forward it to the upstream. /healthz stays the more specific match.
+		mux.HandleFunc(rootEndpoint, s.handleWS)
+	} else {
+		mux.HandleFunc(wsEndpoint, s.handleWS)
+	}
 
 	httpListener, err := net.Listen(networkTCP, s.cfg.ListenAddr)
 	if err != nil {
@@ -82,8 +101,8 @@ func (s *ProxyServer) Start() error {
 		}
 	}()
 
-	log.Printf("server: listening on %s (WS/HTTP), upstream %s, max-connections %d",
-		s.cfg.ListenAddr, s.cfg.UpstreamAddr, s.cfg.MaxConnections)
+	log.Printf("server: listening on %s (WS/HTTP), upstream %s (mode=%s), max-connections %d",
+		s.cfg.ListenAddr, s.cfg.UpstreamAddr, s.cfg.UpstreamMode, s.cfg.MaxConnections)
 	return nil
 }
 
@@ -115,7 +134,19 @@ func (s *ProxyServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.releaseConn()
 
-	wsConn, err := s.upgrader.Upgrade(w, r, nil)
+	wsMode := s.cfg.UpstreamMode == UpstreamModeWS
+
+	upgrader := s.upgrader
+	clientMsgType := websocket.BinaryMessage
+	if wsMode {
+		// Echo the client's requested subprotocols so the negotiated OCPP
+		// version (e.g. ocpp1.6) is preserved end-to-end, and speak text
+		// frames as OCPP-J requires.
+		upgrader.Subprotocols = websocket.Subprotocols(r)
+		clientMsgType = websocket.TextMessage
+	}
+
+	wsConn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("server: ws upgrade error: %v", err)
 		return
@@ -125,7 +156,7 @@ func (s *ProxyServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	s.activeConns.Add(1)
 	s.activeWSConns.Store(connID, wsConn)
 
-	clientReader, clientWriter, closeAdapter := newWSAdapter(wsConn)
+	clientReader, clientWriter, closeAdapter := newWSAdapter(wsConn, clientMsgType)
 
 	defer func() {
 		s.activeWSConns.Delete(connID)
@@ -133,10 +164,50 @@ func (s *ProxyServer) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.activeConns.Done()
 	}()
 
-	ru := NewResilientUpstream(s.ctx, s.cfg.UpstreamAddr, s.cfg.UpstreamTimeout, s.cfg.ReconnectTimeout)
-	defer ru.Close()
+	var up upstream
+	if wsMode {
+		upURL, uerr := s.buildUpstreamURL(r)
+		if uerr != nil {
+			log.Printf("server: bad upstream url: %v", uerr)
+			return
+		}
+		up = NewResilientWSUpstream(s.ctx, upURL, websocket.Subprotocols(r), s.cfg.UpstreamTimeout, s.cfg.ReconnectTimeout)
+	} else {
+		up = NewResilientUpstream(s.ctx, s.cfg.UpstreamAddr, s.cfg.UpstreamTimeout, s.cfg.ReconnectTimeout)
+	}
+	defer up.Close()
 
-	s.runPipelines(clientReader, clientWriter, ru, ru)
+	s.runPipelines(clientReader, clientWriter, up)
+}
+
+// buildUpstreamURL derives the upstream WebSocket URL for a client request by
+// joining the configured upstream base (scheme://host[/prefix]) with the
+// incoming request path and query — making the proxy transparent to path-based
+// routing such as OCPP's /ocpp/{cpID}. A bare host:port is assumed to be ws://.
+func (s *ProxyServer) buildUpstreamURL(r *http.Request) (string, error) {
+	base := s.cfg.UpstreamAddr
+	if !strings.Contains(base, "://") {
+		base = "ws://" + base
+	}
+	u, err := url.Parse(base)
+	if err != nil {
+		return "", err
+	}
+	u.Path = singleJoiningSlash(u.Path, r.URL.Path)
+	u.RawQuery = r.URL.RawQuery
+	return u.String(), nil
+}
+
+func singleJoiningSlash(a, b string) string {
+	aslash := strings.HasSuffix(a, "/")
+	bslash := strings.HasPrefix(b, "/")
+	switch {
+	case aslash && bslash:
+		return a + b[1:]
+	case !aslash && !bslash:
+		return a + "/" + b
+	}
+	return a + b
 }
 
 type cancelReader struct {
@@ -161,43 +232,43 @@ func (cr *cancelReader) Read(p []byte) (int, error) {
 
 func (s *ProxyServer) runPipelines(
 	clientReader io.Reader, clientWriter io.Writer,
-	upReader io.Reader, upWriter io.Writer,
+	up upstream,
 ) {
 	ctx, cancel := context.WithCancel(s.ctx)
 	defer cancel()
 
 	wrappedClientReader := &cancelReader{r: clientReader, cancel: cancel, ctx: ctx}
-	wrappedUpReader := &cancelReader{r: upReader, cancel: cancel, ctx: ctx}
+	wrappedUpReader := &cancelReader{r: up, cancel: cancel, ctx: ctx}
 
 	sancCap := s.cfg.SanctuaryCap
 	if sancCap <= 0 {
 		sancCap = defaultSancCap
 	}
 
-	ingress := pipeline.NewPipeline(wrappedClientReader, upWriter,
+	ingress := pipeline.NewPipeline(wrappedClientReader, up,
 		pipeline.WithSanctuaryCapacity(sancCap),
+		pipeline.WithReadBufferSize(s.cfg.ReadBufferSize),
 	)
 	egress := pipeline.NewPipeline(wrappedUpReader, clientWriter,
 		pipeline.WithSanctuaryCapacity(sancCap),
+		pipeline.WithReadBufferSize(s.cfg.ReadBufferSize),
 	)
 
 	s.configureBackpressure(ingress)
 	s.configureBackpressure(egress)
 
-	if ru, ok := upWriter.(*ResilientUpstream); ok {
-		if !ru.IsConnected() {
-			ingress.Valve().TransitionTo(valve.HELD)
-		}
-		ingress.RegisterRule(interceptor.Rule{
-			Name: "reconnect-and-drain",
-			Predicate: func() bool {
-				return ru.IsConnected() && ingress.Valve().State() == valve.HELD
-			},
-			Action: func() {
-				ingress.Valve().TransitionTo(valve.DRAINING)
-			},
-		})
+	if !up.IsConnected() {
+		ingress.Valve().TransitionTo(valve.HELD)
 	}
+	ingress.RegisterRule(interceptor.Rule{
+		Name: "reconnect-and-drain",
+		Predicate: func() bool {
+			return up.IsConnected() && ingress.Valve().State() == valve.HELD
+		},
+		Action: func() {
+			ingress.Valve().TransitionTo(valve.DRAINING)
+		},
+	})
 
 	if err := ingress.Start(); err != nil {
 		log.Printf("server: ingress start error: %v", err)
@@ -212,11 +283,7 @@ func (s *ProxyServer) runPipelines(
 	<-ctx.Done()
 
 	ingress.Stop(s.cfg.ShutdownDrainTimeout)
-
-	if ru, ok := upWriter.(*ResilientUpstream); ok {
-		ru.Close()
-	}
-
+	up.Close()
 	egress.Stop(0)
 }
 
