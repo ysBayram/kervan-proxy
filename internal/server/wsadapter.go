@@ -16,6 +16,7 @@ const (
 
 type wsAdapter struct {
 	conn      *websocket.Conn
+	msgType   int
 	writeMu   sync.Mutex
 	stopCh    chan struct{}
 	closeOnce sync.Once
@@ -60,7 +61,7 @@ func (w *wsWriter) Write(p []byte) (int, error) {
 	defer w.adapter.writeMu.Unlock()
 
 	w.adapter.conn.SetWriteDeadline(time.Now().Add(writeWait))
-	if err := w.adapter.conn.WriteMessage(websocket.BinaryMessage, p); err != nil {
+	if err := w.adapter.conn.WriteMessage(w.adapter.msgType, p); err != nil {
 		return 0, err
 	}
 	return len(p), nil
@@ -96,10 +97,15 @@ func (a *wsAdapter) close() {
 	})
 }
 
-func newWSAdapter(conn *websocket.Conn) (io.Reader, io.Writer, func()) {
+// newWSAdapter wraps a client WebSocket connection as an io.Reader/io.Writer
+// pair for the pipeline. msgType is the frame type used for writes back to the
+// client (websocket.TextMessage for OCPP, websocket.BinaryMessage for the raw
+// TCP bridge).
+func newWSAdapter(conn *websocket.Conn, msgType int) (io.Reader, io.Writer, func()) {
 	a := &wsAdapter{
-		conn:   conn,
-		stopCh: make(chan struct{}),
+		conn:    conn,
+		msgType: msgType,
+		stopCh:  make(chan struct{}),
 	}
 
 	conn.SetPongHandler(func(string) error {
