@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,6 +23,7 @@ import (
 type ResilientWSUpstream struct {
 	url              string
 	subprotocols     []string
+	headers          http.Header
 	dialTimeout      time.Duration
 	reconnectTimeout time.Duration
 	ctx              context.Context
@@ -37,11 +39,12 @@ type ResilientWSUpstream struct {
 	readBuf []byte // leftover of a message larger than the caller's slice (Read only)
 }
 
-func NewResilientWSUpstream(ctx context.Context, url string, subprotocols []string, dialTimeout, reconnectTimeout time.Duration) *ResilientWSUpstream {
+func NewResilientWSUpstream(ctx context.Context, url string, subprotocols []string, headers http.Header, dialTimeout, reconnectTimeout time.Duration) *ResilientWSUpstream {
 	parentCtx, cancel := context.WithCancel(ctx)
 	ru := &ResilientWSUpstream{
 		url:              url,
 		subprotocols:     subprotocols,
+		headers:          headers,
 		dialTimeout:      dialTimeout,
 		reconnectTimeout: reconnectTimeout,
 		ctx:              parentCtx,
@@ -72,7 +75,7 @@ func (ru *ResilientWSUpstream) reconnectLoop() {
 		default:
 		}
 
-		conn, _, err := dialer.DialContext(ru.ctx, ru.url, nil)
+		conn, resp, err := dialer.DialContext(ru.ctx, ru.url, ru.headers)
 		if err == nil {
 			ru.mu.Lock()
 			ru.conn = conn
@@ -83,6 +86,11 @@ func (ru *ResilientWSUpstream) reconnectLoop() {
 			return
 		}
 
+		// If we received an HTTP response during the handshake, log the status
+		// to aid debugging (e.g. 4xx/5xx from upstream)
+		if resp != nil {
+			log.Printf("resilient-ws-upstream: dial failed with http status %s for %s", resp.Status, ru.url)
+		}
 		log.Printf("resilient-ws-upstream: connection to %s failed: %v. Retrying in %s...", ru.url, err, reconnectRetryDelay)
 
 		ru.mu.Lock()
@@ -124,9 +132,17 @@ func (ru *ResilientWSUpstream) Read(p []byte) (int, error) {
 		conn := ru.conn
 		ru.mu.Unlock()
 
-		_, msg, err := conn.ReadMessage()
+		// ReadMessage returns the message type and payload. For OCPP we expect
+		// text frames; if we observe a non-text frame treat it as a protocol
+		// mismatch and trigger a reconnect so the connection can be re-established
+		// cleanly.
+		msgType, msg, err := conn.ReadMessage()
 		if err != nil {
 			ru.handleConnErr("read", err, conn)
+			continue
+		}
+		if msgType != websocket.TextMessage {
+			ru.handleConnErr("read:non-text", fmt.Errorf("unexpected message type %d", msgType), conn)
 			continue
 		}
 
