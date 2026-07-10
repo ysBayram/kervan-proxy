@@ -39,6 +39,8 @@ flowchart TD
     P6["Phase 6: Edge Cases & Failure Resilience"]
     P7["Phase 7: Monitoring & Analytics (PostgreSQL)"]
     P8["Phase 8: Dev Tooling & CI"]
+    P9["Phase 9: TCP/WebSocket Proxy Server"]
+    P10["Phase 10: Post-Implementation Audit, Hardening & Resilient Reconnection"]
 
     P1 --> P2
     P1 --> P3
@@ -48,6 +50,8 @@ flowchart TD
     P5 --> P6
     P6 --> P7
     P7 --> P8
+    P8 --> P9
+    P9 --> P10
 ```
 
 ---
@@ -422,6 +426,58 @@ sequenceDiagram
 
 ---
 
+## Phase 9: TCP/WebSocket Proxy Server
+
+**Goal:** Build a production-ready TCP and WebSocket proxy server on top of the Pipeline SDK, supporting 10K concurrent connections with circuit-breaking, backpressure, and graceful shutdown.
+
+### Architecture
+
+```mermaid
+flowchart LR
+    subgraph Client["Client (WS/TCP)"]
+        CR["io.Reader (client→up)"]
+        CW["io.Writer (up→client)"]
+    end
+
+    subgraph Proxy["Kervan-Proxy Server"]
+        H["HTTP Handler<br/>(/ws, /healthz)"]
+        T["TCP Relay<br/>(raw TCP)"]
+        UP["WebSocket Upgrader"]
+        IP["ingress Pipeline<br/>(client→upstream)"]
+        EP["egress Pipeline<br/>(upstream→client)"]
+    end
+
+    subgraph Upstream["Upstream Backend"]
+        US["TCP Endpoint"]
+    end
+
+    CR --> H
+    H --> UP
+    UP --> IP
+    IP --> US
+    US --> EP
+    EP --> CW
+    US --> T
+    T --> CR
+```
+
+### Subtasks
+
+| # | Subtask | Acceptance Criteria |
+|---|---------|---------------------|
+| 9.1 | Add `gorilla/websocket` dependency | `go get github.com/gorilla/websocket`; `go build ./...` succeeds |
+| 9.2 | Configuration via flags and env vars | CLI flags: `--listen`, `--upstream`, `--capacity`, `--backpressure`, `--max-connections`, `--upstream-timeout` |
+| 9.3 | `wsAdapter` — wraps `gorilla/websocket.Conn` as `io.Reader`/`io.Writer` | Read hangs until message arrives; Write sends message frames |
+| 9.4 | Bi-directional pipeline wiring | Each connection gets ingress + egress Pipeline, both Start'd and Stop'd atomically |
+| 9.5 | TCP relay handler and WebSocket upgrader | Raw TCP connects to upstream; WS `/ws` upgrades and proxies |
+| 9.6 | Connection lifecycle | Accept → handshake → pipeline Start → block → cleanup; `--max-connections` enforces limit |
+| 9.7 | Graceful shutdown (SIGINT/SIGTERM) | `signal.Notify` → listener close → active connections Stop'd → wait |
+| 9.8 | Health check and metrics endpoint | `GET /healthz` returns `{"status":"ok","connections":N,"uptime":"..."}` |
+| 9.9 | Integration test: echo upstream | Client sends data → proxy relays → upstream echoes back → client receives |
+| 9.10 | Circuit-breaking integration test | Upstream fails → valve HELD → buffers → upstream recovers → DRAINING → OPEN |
+
+---
+
 ## Summary Timeline
 
 | Phase | Est. Duration | Key Deliverable |
@@ -434,4 +490,170 @@ sequenceDiagram
 | P6: Edge Cases | 2 days | 4 failure mode handlers |
 | **P7: Monitoring** | **3 days** | **Async + PostgreSQL observability** |
 | P8: Tooling & CI | 1 day | Makefile, linter, CI, docs |
-| **Total** | **~16 days** | |
+| P9: Proxy Server | 2 days | TCP/WS proxy with 10K concurrent connections |
+| P10: Audit, Hardening & Reconnection | 5 days | Concurrency, leaks, memory optimizations, and upstream auto-reconnect |
+| P11: WebSocket Resilience | 3 days | Ping/pong, bounded reconnect, graceful shutdown, drain timeout, drop_connection |
+| **Total** | **~26 days** | |
+
+---
+
+## Phase 10: Post-Implementation Audit, Hardening & Resilient Reconnection
+
+**Goal:** Perform systematic codebase-wide audit (concurrency safety, CPU efficiency, resource leaks) and implement transparent reconnect and client buffering on target backend failure in the HTTP/WebSocket proxy server.
+
+### Motivation
+
+Initial phases focused on functional correctness (valve transitions, pipeline orchestration, interceptor evaluation). Production-readiness requires deeper verification of concurrent access patterns, goroutine lifecycle hygiene, and runtime efficiency. This phase closes those gaps without changing the public API.
+
+### Subtasks
+
+| # | Subtask | Acceptance Criteria |
+|---|---------|---------------------|
+| 10.1 | Create `ResilientUpstream` wrapper | Thread-safe `ResilientUpstream` wrapping `net.Conn` with background reconnect loop and blocking `Read`. |
+| 10.2 | Integrate `ResilientUpstream` into `ProxyServer` | Replace static upstream dial in `handleWS` and register state transition rules on `ingress` pipeline. |
+| 10.3 | Implement integration tests for reconnection | Test successful connection during downtime, buffering, and auto-drain on backend recovery. |
+| 10.4 | Concurrency audits & fixes | Eliminate TOCTOU state checking in Valve FSM; protect Interceptor chain from concurrent access; safe EventBus closing. |
+| 10.5 | Lifecycle & leak audits | Solve goroutine leak in pgx recorder; prevent pipeline execution busy-spin via time yield in HELD state. |
+| 10.6 | Performance & resource optimizations | Integrate sync.Pool buffer allocations directly into pipeline hot paths via PopTo. |
+| 10.7 | Containerization infrastructure | Construct production multi-stage Dockerfile and dev compose environment with mock services. |
+
+### Detected Issues
+
+| # | Category | Risk | Component | Problem |
+|---|----------|------|-----------|---------|
+| 1 | Concurrency | 🔴 CRITICAL | `internal/valve/valve.go` — `TransitionTo` | TOCTOU race: `v.State()` called twice allows stale-state CAS |
+| 2 | CPU | 🔴 CRITICAL | `internal/pipeline/pipeline.go` — `executionLoop` | Busy-spin at 100% CPU in HELD state (tight `for{select{default}}` loop) |
+| 3 | Safety | 🔴 CRITICAL | `internal/monitoring/eventbus.go` — `Close()` | Double-`close(ch)` causes runtime panic |
+| 4 | Concurrency | 🔴 CRITICAL | `internal/interceptor/interceptor.go` — `AddRule` / `Evaluate` | Unprotected slice access causes data race |
+| 5 | Resource | 🔴 CRITICAL | `internal/monitoring/recorder_pgx.go` — `batchLoop` | Goroutine leak: `Stop()` closes `r.done` but `batchLoop` never listens on it |
+| 6 | Resource | 🟠 HIGH | `internal/monitoring/recorder_pgx.go` — `Start()` | Pool assigned before migration; closed pool reference on migration failure |
+| 7 | Resource | 🟠 HIGH | `internal/server/proxy.go` — `runPipelines` | Circular ctx-dependency blocks shutdown on client disconnect |
+| 8 | Resource | 🟠 HIGH | `internal/server/proxy.go` — `tcpListener` | Never assigned to struct field; `Stop()`'s nil-check is dead code |
+| 9 | Config | 🟡 MEDIUM | `internal/server/proxy.go` — `http.Server` | `WriteTimeout` defined in Config but never set on server |
+| 10 | Performance | 🟡 MEDIUM | `internal/pipeline/pipeline.go` — `ingestionLoop` | Per-read `make([]byte, n)` allocation on every Read |
+| 11 | Performance | 🟡 MEDIUM | `internal/sanctuary/sanctuary.go` — `Pop()` | Per-Pop allocation bypassing pool benefit |
+| 12 | Design | 🔵 LOW | `internal/interceptor/actions.go` — `ValveController` | String-based interface incompatible with concrete `valve.ValveState` |
+| 13 | Quality | 🔵 LOW | `internal/server/proxy_test.go` — `TestConnectionLimit` | Limit value set but never validated with exceeded attempt |
+
+### Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Shutdown signalling for `runPipelines` | `cancelReader` (wrapper) | Wraps `io.Reader` to call `context.CancelFunc` on read error; clean separation — pipeline remains agnostic of lifecycle management |
+| Busy-loop mitigation | `time.After(10ms)` in HELD state | 100 edges/s max yields negligible CPU (≈0.1% per goroutine); preserves responsiveness without notification channel complexity |
+| Rule-chain thread safety | Snapshot-copy under mutex | `evaluate` copies the rule slice once, then evaluates predicates/actions outside lock; prevents long-running actions from blocking `AddRule` |
+| EventBus double-close | `sync.Once` | Zero-dependency, standard library solution; minimal overhead (atomic load after first call) |
+| Pipeline `Pop()` → `PopTo()` | Write-direct API | Eliminates per-item allocation for the hot drain path; existing `Pop()` retained for API consumers needing byte ownership |
+| `ValveController` interface | Use concrete `valve.ValveState` | String-based abstraction required runtime string→enum mapping in every implementation; concrete type eliminates mapping at negligible coupling cost |
+| `activeConns` WaitGroup | Wired in Phase 11 via `SetReadDeadline` | Phase 10 deferred this; Phase 11 adds read deadline + `activeConns.Add/Done` to enable graceful shutdown without deadlock |
+
+### Docker Infrastructure
+
+**Goal:** Containerised deployment and local development workflow via Docker and Docker Compose.
+
+#### Files
+
+| File | Purpose |
+|------|---------|
+| `Dockerfile` | Multi-stage build: `golang:1.26-alpine` builder → `alpine:3.21` runtime; `BUILD_TAGS` build-arg for monitoring variant |
+| `docker-compose.yml` | Three profiles: `default` (standalone proxy), `dev` (proxy + TCP echo server), `monitoring` (proxy + PostgreSQL) |
+| `.dockerignore` | Excludes `build/`, `.git/`, `*.md`, `.env` from Docker context |
+
+#### Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Base image | `alpine:3.21` (not distroless) | ca-certificates + tzdata pre-installed; shell access for debugging |
+| Build tag passthrough | `--build-arg BUILD_TAGS=monitoring` | Single Dockerfile builds both standard and monitoring variants |
+| Echo server | `python:3.13-alpine` with inline socketserver | Zero project code needed; fully self-contained in compose |
+| PostgreSQL volume | Named volume `pgdata` | Persists across restarts; no host path coupling |
+| Profile isolation | Three compose profiles | Clean separation; no conditional `depends_on` tangles |
+| Default upstream | `host.docker.internal:9000` | Points to host loopback by default; overridable via `UPSTREAM` env |
+
+---
+
+## Phase 11: WebSocket Resilience, Graceful Shutdown & Reconnect Timeout
+
+**Goal:** Production-harden the WebSocket proxy server with connection keepalive (ping/pong), bounded reconnection attempts, graceful connection draining on shutdown, and configurable backpressure disconnect strategy.
+
+### Motivation
+
+Phase 10 introduced the `ResilientUpstream` with infinite reconnect loop, but left several production gaps: (1) WebSocket connections have no application-level keepalive, so half-open TCP states go undetected; (2) a permanently unreachable backend holds client connections open forever; (3) server shutdown is a hard cut with no drain coordination; (4) buffer saturation silently drops data with no connection-level signal.
+
+### Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Ping/pong interval | 30s ping, 60s read deadline | Standard WebSocket keepalive; allows 2 missed pings before timeout |
+| Reconnect timeout | Configurable (default 30s) | Bounded reconnect prevents zombie connections; configurable per deployment |
+| Shutdown drain timeout | Configurable (default 30s) | Allows buffered data to flush to upstream before hard stop |
+| Buffer overflow on saturation | `drop_connection` (new mode) | Replaces silent data loss with explicit connection termination; client can reconnect |
+| WS read deadline for graceful stop | `SetReadDeadline` on shutdown | Breaks `ReadMessage` block so `activeConns.Wait()` can complete without deadlock |
+
+### User Stories
+
+| # | Story | Description |
+|---|-------|-------------|
+| **U1** | **Connection Keepalive** | As an operator, I want WebSocket connections to be automatically terminated when the client silently disappears, so that zombie connections do not accumulate. |
+| **U2** | **Bounded Reconnect** | As an operator, I want client connections to be closed when the upstream backend is unreachable for a configurable timeout, so that resources are not held indefinitely. |
+| **U3** | **Graceful Shutdown** | As an operator, I want the proxy to drain in-flight data and wait for active connections to finish when shutting down, so that no data is lost during deployment restarts. |
+| **U4** | **Buffer Overflow Disconnect** | As a developer, I want the proxy to close the connection when the buffer overflows instead of silently dropping data, so that the client can make an explicit reconnection decision. |
+| **U5** | **Shutdown Drain Timeout** | As an operator, I want the proxy to attempt draining remaining buffered data for a configurable duration before force-stopping, so that upstream receives as much data as possible during rolling updates. |
+
+### Subtasks
+
+| # | Subtask | Component | Acceptance Criteria |
+|---|---------|-----------|---------------------|
+| 11.1 | **WebSocket Ping/Pong** | `internal/server/wsadapter.go` | Proxy sends ping every 30s; pong handler resets deadline; 60s read timeout triggers connection close. |
+| 11.2 | **Reconnect Timeout** | `internal/server/resilient_conn.go`, `internal/server/config.go` | New `ReconnectTimeout` field (default 30s). `ResilientUpstream` starts timer on first failure; if timer expires before reconnection, pipeline context is cancelled and client connection is released. |
+| 11.3 | **Graceful Server Shutdown** | `internal/server/proxy.go`, `internal/server/wsadapter.go` | `activeConns` WaitGroup properly wired (`Add`/`Done`). WS `SetReadDeadline` on shutdown breaks `ReadMessage` block. `httpServer.Shutdown` used instead of `Close`. |
+| 11.4 | **Buffer Overflow Drop Connection** | `internal/pipeline/pipeline.go`, `internal/sanctuary/sanctuary.go`, `internal/server/config.go` | New `DropConnection` backpressure action. When buffer is full and action is `DropConnection`, pipeline cancels its context → pipeline stops → client connection closes. Config flag `--backpressure=drop_connection`. |
+| 11.5 | **Shutdown Drain Timeout** | `internal/pipeline/pipeline.go`, `internal/server/proxy.go`, `internal/server/config.go` | `Pipeline.Stop(timeout)` attempts drain for up to `ShutdownDrainTimeout` (default 30s) before hard cancel. Execution loop respects drain context during DRAINING state. |
+| 11.6 | **Integration Tests** | `internal/server/proxy_test.go`, `internal/pipeline/edge_test.go` | Tests for ping/pong timeout, reconnect timeout expiry, graceful shutdown with active connections, drop_connection backpressure mode, drain timeout cancellation. All pass with `-race`. |
+| 11.7 | **Config & Flag Updates** | `internal/server/config.go` | New flags: `--reconnect-timeout`, `--shutdown-drain-timeout`. Backpressure flag accepts `drop_connection`. |
+| 11.8 | **Extract Hardcoded Values into Constants** | `internal/pipeline/pipeline.go`, `internal/interceptor/actions.go`, `internal/server/proxy.go`, `internal/server/resilient_conn.go` | Replace inline magic values (numeric literals, string constants, durations) with named package-level constants. Replace duplicated valve state strings with `valve.X.String()` and backpressure strings with `sanctuary.X.String()`. No behavioural change. |
+
+### Summary Timeline Update
+
+| Phase | Est. Duration | Key Deliverable |
+|-------|---------------|-----------------|
+| P11: WebSocket Resilience | 3 days | Ping/pong, bounded reconnect, graceful shutdown, drain timeout, drop_connection |
+| P12: Code Review Audit Fixes | 3 days | Nil pointer fix, ID collision fix, drain bug fix, busy-spin fix, write deadline, reconnect guard, formatting |
+| **Total** | **~29 days** | |
+
+---
+
+## Phase 12: Code Review Audit Fixes
+
+**Goal:** Address the most impactful findings from the code review report — nil pointer panics, ID collision deadlocks, invalid FSM transitions, CPU busy-spin, missing write deadlines, goroutine leaks, and maintainability gaps.
+
+### Motivation
+
+The comprehensive code review (v2) identified 30+ findings across all packages. This phase tackles the highest-severity items: (1) a nil pointer panic in `recorder_pgx.go` that makes the monitoring build tag crash on startup; (2) a dual-use `connCounter` causing ID collisions and shutdown deadlocks; (3) a silently skipped drain phase in `Pipeline.Stop` due to an invalid FSM transition; (4) a 100% CPU busy-spin in the OPEN execution loop; (5) missing write deadlines that can block WebSocket writes indefinitely; and (6) multiple goroutine leak and data race windows.
+
+### Design Decisions
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| OPEN→DRAINING transition | Add to FSM matrix | Cleanest fix for Stop drain skip; semantically valid for shutdown |
+| connID source | Separate monotonic `atomic.Int64` (never decremented) | Eliminates collision without UUID overhead |
+| OPEN state throttle | Add `openPollInterval = 100 * time.Millisecond` | Slow enough for negligible CPU (≈10 polls/s), fast enough for responsiveness |
+| reconnectLoop guard | Atomic bool `reconnecting` | Prevents goroutine pileup without extra channels |
+| errcheck linter | Re-enable with path-based exclusions | Catches unchecked errors while allowing intentional discards |
+| fmt-check | New `fmt-check` target in Makefile | Fails CI on unformatted files; `ci-check` runs it |
+
+### Subtasks
+
+| # | Subtask | Component | Acceptance Criteria |
+|---|---------|-----------|---------------------|
+| 12.1 | **Fix nil pointer in recorder_pgx.Start** | `internal/monitoring/recorder_pgx.go` | Move `r.pool = pool` assignment before `runMigrations` call. Remove duplicate DB URL default (config layer already provides it). |
+| 12.2 | **Fix connCounter ID collision** | `internal/server/proxy.go` | Add separate `connIDSeq` monotonic `atomic.Int64` for unique connection IDs. `connCounter` remains for limit enforcement only. |
+| 12.3 | **Fix invalid OPEN→DRAINING transition in Stop** | `internal/valve/state.go`, `internal/pipeline/pipeline.go` | Add `OPEN → DRAINING` to FSM transition matrix. Change `Stop()` to read the state once and attempt the single transition. Remove redundant DRAINING→DRAINING no-op guard. |
+| 12.4 | **Fix Close() not setting ru.connected=false** | `internal/server/resilient_conn.go` | Add `ru.connected = false` in `Close()` before `Broadcast()` to prevent nil connection reads. |
+| 12.5 | **Add polling interval to OPEN state** | `internal/pipeline/pipeline.go` | Add `openPollInterval = 100ms` constant; use `select { case <-time.After(openPollInterval): case <-p.ctx.Done(): }` in OPEN state to eliminate busy-spin. |
+| 12.6 | **Add write deadline to wsWriter.Write** | `internal/server/wsadapter.go` | Call `conn.SetWriteDeadline(time.Now().Add(writeWait))` before `WriteMessage` in normal writes (ping loop already does this). |
+| 12.7 | **Fix activeConns.Add(1) ordering window** | `internal/server/proxy.go` | Move `s.activeConns.Add(1)` before `s.activeWSConns.Store`, ideally right after WS upgrade succeeds. |
+| 12.8 | **Prevent multiple concurrent reconnectLoop goroutines** | `internal/server/resilient_conn.go` | Add `reconnecting atomic.Bool` field. Guard `go ru.reconnectLoop()` calls with CAS. |
+| 12.9 | **Make blockSize const and fix DropOldest allocation** | `internal/sanctuary/sanctuary.go` | Change `var blockSize = 4096` to `const blockSize = 4096`. Remove allocation in `DropOldest` since all callers discard the return value. |
+| 12.10 | **go.mod tidy, golangci-lint errcheck, Makefile fmt-check** | `go.mod`, `.golangci.yml`, `Makefile` | Run `go mod tidy` to fix `gorilla/websocket` indirect annotation. Re-enable `errcheck` with `exclude-rules` for test files and `Encode`. Add `fmt-check` target to `ci-check`. |
+| 12.11 | **EventBus publish-after-close guard** | `internal/monitoring/eventbus.go` | Add `closed atomic.Bool` field; set in `Close()`; check in `Publish()` to prevent panic. |
